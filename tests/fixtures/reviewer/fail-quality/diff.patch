@@ -1,0 +1,23 @@
+diff --git a/src/math_helpers.py b/src/math_helpers.py
+new file mode 100644
+index 0000000..5f60718
+--- /dev/null
++++ b/src/math_helpers.py
+@@ -0,0 +1,18 @@
++def divide(a, b):
++    # def old_divide(a, b):
++    #     return a / b
++    # def even_older_divide(a, b):
++    #     return float(a) / float(b)
++    try:
++        result = a / b
++    except Exception:
++        pass
++
++    unused_constant = 42
++
++    def helper():
++        # never called from anywhere
++        return None
++
++    return result

@@ -1,0 +1,3 @@
+src/hello.py exists.
+The module defines a function named `hello`.
+hello() returns the literal string "Hello, World!".

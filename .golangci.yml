@@ -1,0 +1,13 @@
+# .golangci.yml — conservative linter config for codex-dispatch.
+# errcheck is excluded: defer-close and fmt.Fprintln-to-stderr patterns
+# throughout the codebase are intentionally not checked.
+# gosimple is merged into staticcheck in golangci-lint v2.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused

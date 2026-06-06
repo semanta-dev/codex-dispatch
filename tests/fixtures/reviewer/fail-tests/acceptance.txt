@@ -1,0 +1,2 @@
+hello() returns "Hello, World!".
+The project's test suite still passes.

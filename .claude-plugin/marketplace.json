@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "codex-dispatch",
+  "description": "Local marketplace for the Codex Dispatch Claude Code plugin.",
+  "owner": {
+    "name": "Jordan Dziat",
+    "email": "hello@nocturnium.ai"
+  },
+  "plugins": [
+    {
+      "name": "codex-dispatch",
+      "description": "Delegate well-scoped coding tasks to the local OpenAI Codex CLI agent and review its output through a structured verdict loop. Exposes /codex, /codex-orchestrate, GraphRAG packet dispatch, and subagents over a shared dispatch core.",
+      "author": {
+        "name": "Jordan Dziat",
+        "email": "hello@nocturnium.ai"
+      },
+      "source": "./",
+      "homepage": "https://github.com/semanta-dev/codex-dispatch"
+    }
+  ]
+}

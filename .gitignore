@@ -1,0 +1,38 @@
+# Per-run dispatch artifacts (result.json, stdout.log, diff.patch, prompt copy)
+.codex-dispatch/
+
+# Test scratch — throwaway git repos created by Bats helpers
+tests/tmp/
+tests/**/.tmp/
+
+# Logs and local scratch
+*.log
+.scratch/
+
+# SDK comparison harness: keep ONLY the harness (runner scripts + quality tests);
+# ignore everything else under tests/sdk — benchmark run outputs (timestamped run
+# dirs, *-latest.txt, results-*.json), *-repo scratch git repos, node_modules,
+# package-lock. New run-dir names are covered automatically.
+tests/sdk/*
+!tests/sdk/*.py
+!tests/sdk/*.sh
+!tests/sdk/*.mjs
+!tests/sdk/package.json
+!tests/sdk/quality/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Go
+/dist/
+/coverage.out
+__pycache__/
+*.pyc
+
+# compiled test fixture binary (built ad hoc during local runs)
+tests/fixtures/fake-appserver/fake-appserver

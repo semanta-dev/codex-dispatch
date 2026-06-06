@@ -1,0 +1,1 @@
+Do not modify src/database.py or any other files unrelated to the hello module.

@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start.sh"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/stop.sh"}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-end.sh"}]}
+    ]
+  }
+}

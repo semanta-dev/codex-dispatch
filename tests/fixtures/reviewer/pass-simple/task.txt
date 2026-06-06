@@ -1,0 +1,1 @@
+Add a Python module src/hello.py that defines a function `hello()` returning the string "Hello, World!".

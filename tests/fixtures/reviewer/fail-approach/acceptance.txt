@@ -1,0 +1,2 @@
+GET /healthz on the FastAPI app returns 200 with JSON body {"status": "ok"}.
+The existing FastAPI app structure (routers, dependencies) is preserved.

@@ -1,0 +1,8 @@
+diff --git a/src/hello.py b/src/hello.py
+new file mode 100644
+index 0000000..2c3d4e5
+--- /dev/null
++++ b/src/hello.py
+@@ -0,0 +1,2 @@
++def hello():
++    return "Hi"

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt issues:"
+            echo "$out"
+            exit 1
+          fi
+      - name: go test (race detector)
+        run: go test -race ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: "~> v2"
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck scripts/*.sh scripts/hooks/*.sh tests/bats/helpers/setup.bash
+      - name: jq validate plugin manifest
+        run: jq -e . .claude-plugin/plugin.json >/dev/null
+      - name: jq validate hooks manifest
+        run: jq -e . .claude-plugin/hooks/hooks.json >/dev/null
+
+  snapshot-and-bats:
+    runs-on: ubuntu-latest
+    needs: [go, shell]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: build --snapshot --clean --single-target
+      - name: locate snapshot binary
+        id: bin
+        run: |
+          path=$(find dist -type f -name codex-dispatch -perm -u+x | head -n 1)
+          if [ -z "$path" ]; then
+            echo "snapshot binary not found"; exit 1
+          fi
+          echo "path=$(pwd)/$path" >>"$GITHUB_OUTPUT"
+      - name: install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      - name: run bats against snapshot binary
+        env:
+          CODEX_DISPATCH_BIN: ${{ steps.bin.outputs.path }}
+        run: |
+          bats tests/bats/dispatch-codex.bats
+          bats tests/bats/pick-iterations.bats
+          bats tests/bats/launcher.bats
+          bats tests/bats/dispatch-detach.bats
+          bats tests/bats/hooks.bats
+          bats tests/bats/graphrag-scope-audit.bats
+          bats tests/bats/graphrag-worktree-dispatch.bats
+      - name: run plan-runner bats
+        run: bats tests/bats/graphrag-plan-runner.bats

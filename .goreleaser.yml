@@ -1,0 +1,32 @@
+version: 2
+
+builds:
+  - id: codex-dispatch
+    main: ./cmd/codex-dispatch
+    binary: codex-dispatch
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "codex-dispatch_{{.Os}}-{{.Arch}}"
+    files: [] # binary only
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+release:
+  github:
+    owner: semanta-dev
+    name: codex-dispatch
+  draft: false
+  prerelease: auto

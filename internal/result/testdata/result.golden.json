@@ -1,0 +1,1 @@
+{"exit_code":0,"session_id":"abc123","files_changed":["app/main.py"],"lines_added":12,"lines_removed":3,"stdout_path":"/abs/path/to/stdout.log","diff_path":"/abs/path/to/diff.patch","fell_back_to_fresh":false}

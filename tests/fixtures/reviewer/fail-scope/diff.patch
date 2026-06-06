@@ -1,0 +1,26 @@
+diff --git a/src/hello.py b/src/hello.py
+new file mode 100644
+index 0000000..4e5f607
+--- /dev/null
++++ b/src/hello.py
+@@ -0,0 +1,2 @@
++def hello():
++    return "Hello, World!"
+diff --git a/src/database.py b/src/database.py
+index 1111111..2222222 100644
+--- a/src/database.py
++++ b/src/database.py
+@@ -8,9 +8,12 @@ class Database:
+     def __init__(self, conn):
+         self._conn = conn
+
+-    def query(self, sql, args=None):
+-        return self._cursor.execute(sql, args).fetchall()
++    def query(self, sql, args=()):
++        # refactored: require tuple args for clarity
++        cursor = self._conn.cursor()
++        cursor.execute(sql, args)
++        return cursor.fetchall()
+
+     def close(self):
+         self._conn.close()

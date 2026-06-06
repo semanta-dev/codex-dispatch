@@ -1,0 +1,1 @@
+Add a /healthz GET endpoint to the existing FastAPI app at app/main.py. The endpoint must return HTTP 200 with body {"status": "ok"}.
