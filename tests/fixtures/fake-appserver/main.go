@@ -13,6 +13,9 @@
 //	turn/start        → respond {turn: {id, status:"pending"}} then emit
 //	                    turn/started, optional script events, FAKE_APPSERVER_EDIT
 //	                    item events, and turn/completed
+//	command/exec      → respond {exitCode, stdout, stderr}; healthy (exit 0) by
+//	                    default, or a bwrap uid-map failure under
+//	                    FAKE_APPSERVER_BWRAP_BROKEN (the sandbox-preflight probe)
 //	shutdown          → respond {} and exit
 //
 // JSON-RPC client→server notifications we accept:
@@ -46,6 +49,14 @@
 //	                              request carrying an id the client is expected
 //	                              to answer) mid-turn; the value names the method.
 //	                              Unset: no server request is issued.
+//	FAKE_APPSERVER_IGNORE_CLOSE_AND_TERM — keep the process alive after stdin EOF
+//	                              and ignore SIGTERM, so shutdown tests exercise
+//	                              the SIGKILL rung.
+//	FAKE_APPSERVER_BWRAP_BROKEN — make command/exec report a bubblewrap failure
+//	                              (exit 1 + "bwrap: setting up uid map: Permission
+//	                              denied" on stderr) so the broker's sandbox
+//	                              preflight sees an unusable host sandbox. Unset:
+//	                              command/exec reports a healthy exit 0.
 package main
 
 import (
@@ -55,10 +66,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -88,21 +101,39 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 }
 
 func runAppServer(stdin io.Reader, stdout, _ io.Writer, getenv func(string) string) int {
+	if getenv("FAKE_APPSERVER_IGNORE_CLOSE_AND_TERM") != "" {
+		terms := make(chan os.Signal, 1)
+		signal.Notify(terms, syscall.SIGTERM)
+		defer signal.Stop(terms)
+		go func() {
+			for range terms {
+			}
+		}()
+	}
 	state := &fakeState{
 		getenv:  getenv,
 		stdout:  stdout,
 		writeMu: &sync.Mutex{},
 	}
-	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
+	reader := bufio.NewReader(stdin)
+	for {
+		line, err := reader.ReadBytes('\n')
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
+			if err != nil {
+				break
+			}
 			continue
 		}
 		if shouldExit := state.handle(line); shouldExit {
 			return 0
 		}
+		if err != nil {
+			break
+		}
+	}
+	if getenv("FAKE_APPSERVER_IGNORE_CLOSE_AND_TERM") != "" {
+		select {}
 	}
 	return 0
 }
@@ -144,6 +175,8 @@ func (s *fakeState) handle(line []byte) bool {
 		return s.handleThreadResume(id, msg.Params)
 	case "turn/start":
 		return s.handleTurnStart(id)
+	case "command/exec":
+		s.handleCommandExec(id)
 	case "shutdown":
 		s.respond(id, map[string]any{})
 		return true
@@ -189,6 +222,17 @@ func (s *fakeState) handleThreadStart(id *json.Number, params json.RawMessage) b
 		}
 		_ = json.Unmarshal(params, &p)
 		_ = os.WriteFile(rec, []byte(p.Model), 0o644)
+	}
+	// FAKE_APPSERVER_RECORD_CWD=<path>: record the cwd from thread/start so a
+	// test can assert the dispatch threaded the invocation working directory (a
+	// go.work module subdir, say) through to codex rather than collapsing it to
+	// the repo root (empty file when no cwd was sent).
+	if rec := s.getenv("FAKE_APPSERVER_RECORD_CWD"); rec != "" {
+		var p struct {
+			CWD string `json:"cwd"`
+		}
+		_ = json.Unmarshal(params, &p)
+		_ = os.WriteFile(rec, []byte(p.CWD), 0o644)
 	}
 	tid := s.sessionID()
 	s.setThreadID(tid)
@@ -314,6 +358,24 @@ func (s *fakeState) handleTurnStart(id *json.Number) bool {
 		"turn":     map[string]any{"id": turnID, "status": status, "durationMs": 42},
 	})
 	return false
+}
+
+// handleCommandExec answers the command/exec RPC the broker's sandbox preflight
+// uses. By default it reports a healthy run (exit 0, empty output). With
+// FAKE_APPSERVER_BWRAP_BROKEN set it mimics a host whose bubblewrap sandbox
+// cannot start: a nonzero exit carrying the real bwrap uid-map diagnostic on
+// stderr, exactly what codex surfaces on a host that restricts unprivileged user
+// namespaces.
+func (s *fakeState) handleCommandExec(id *json.Number) {
+	if s.getenv("FAKE_APPSERVER_BWRAP_BROKEN") != "" {
+		s.respond(id, map[string]any{
+			"exitCode": 1,
+			"stdout":   "",
+			"stderr":   "bwrap: setting up uid map: Permission denied\n",
+		})
+		return
+	}
+	s.respond(id, map[string]any{"exitCode": 0, "stdout": "", "stderr": ""})
 }
 
 func (s *fakeState) respond(id *json.Number, result any) {

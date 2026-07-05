@@ -563,3 +563,66 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+func TestTaskHandlersOmitQueuedStartedAtAndFormatRunningStartedAt(t *testing.T) {
+	table := NewTable(8, 2048)
+	queuedID, _ := table.Start("s", TaskParams{Mode: "fresh"})
+	runningID, _ := table.Start("s", TaskParams{Mode: "fresh"})
+	if err := table.MarkRunning(runningID); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
+	runningTask, err := table.Status(runningID)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	listOut, err := HandleTaskList(&BrokerState{Table: table})(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("HandleTaskList: %v", err)
+	}
+	for _, task := range listOut.(map[string]any)["tasks"].([]map[string]any) {
+		switch task["task_id"] {
+		case queuedID:
+			if _, ok := task["started_at"]; ok {
+				t.Fatalf("queued task.list started_at = %v, want omitted", task["started_at"])
+			}
+		case runningID:
+			startedAt, ok := task["started_at"].(string)
+			if !ok {
+				t.Fatalf("running task.list started_at = %T, want string", task["started_at"])
+			}
+			if startedAt != formatTaskTimestamp(runningTask.StartedAt) {
+				t.Fatalf("running task.list started_at = %q, want %q", startedAt, formatTaskTimestamp(runningTask.StartedAt))
+			}
+			if _, err := time.Parse(time.RFC3339, startedAt); err != nil {
+				t.Fatalf("running task.list started_at is not RFC3339: %v", err)
+			}
+		}
+	}
+
+	status := HandleTaskStatus(&BrokerState{Table: table})
+	raw, _ := json.Marshal(map[string]any{"task_id": queuedID})
+	statusOut, err := status(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("HandleTaskStatus queued: %v", err)
+	}
+	if _, ok := statusOut.(map[string]any)["started_at"]; ok {
+		t.Fatalf("queued task.status started_at = %v, want omitted", statusOut.(map[string]any)["started_at"])
+	}
+
+	raw, _ = json.Marshal(map[string]any{"task_id": runningID})
+	statusOut, err = status(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("HandleTaskStatus running: %v", err)
+	}
+	startedAt, ok := statusOut.(map[string]any)["started_at"].(string)
+	if !ok {
+		t.Fatalf("running task.status started_at = %T, want string", statusOut.(map[string]any)["started_at"])
+	}
+	if startedAt != formatTaskTimestamp(runningTask.StartedAt) {
+		t.Fatalf("running task.status started_at = %q, want %q", startedAt, formatTaskTimestamp(runningTask.StartedAt))
+	}
+	if _, err := time.Parse(time.RFC3339, startedAt); err != nil {
+		t.Fatalf("running task.status started_at is not RFC3339: %v", err)
+	}
+}

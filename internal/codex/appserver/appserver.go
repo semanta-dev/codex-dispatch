@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -199,10 +198,11 @@ func (h *TurnHandle) Cancel() { h.cancel() }
 // value is unusable; construct with New().
 type AppServer struct {
 	// populated by New
-	cmdPath string
-	cmdArgs []string
-	env     []string
-	cwd     string
+	cmdPath  string
+	cmdArgs  []string
+	env      []string
+	cwd      string
+	childCtl childController // platform teardown seam (process group on POSIX, Job Object on Windows)
 
 	// populated by Spawn (lazily, behind spawnMu + initOnce)
 	spawnMu     sync.Mutex
@@ -215,17 +215,18 @@ type AppServer struct {
 	initialized atomic.Bool
 
 	// populated by reader goroutine
-	nextID     atomic.Int64
-	writeMu    sync.Mutex
-	pending    sync.Map           // map[int64]chan *rpcResponse
-	notifFn    func(Notification) // catch-all for notifications without a thread routing
-	done       chan struct{}      // closed by the reader goroutine when stdout EOFs
-	readerDone chan struct{}      // closed when the reader goroutine has fully returned
-	doneErr    atomic.Pointer[error]
+	nextID        atomic.Int64
+	writeMu       sync.Mutex
+	pending       sync.Map           // map[int64]chan *rpcResponse
+	notifFn       func(Notification) // catch-all for notifications without a thread routing
+	done          chan struct{}      // closed by the reader goroutine when stdout EOFs
+	readerDone    chan struct{}      // closed when the reader goroutine has fully returned
+	readerStarted atomic.Bool
+	doneErr       atomic.Pointer[error]
 
 	// populated by StartTurn
 	turnsMu sync.Mutex
-	turns   map[string]*turnState // keyed by Turn.id
+	turns   map[string]*turnState // keyed by Thread.id; one in-flight turn per thread
 }
 
 // Sentinel errors for the new surface.
@@ -242,6 +243,8 @@ var (
 // turn draining alongside the killed turn is not silently mislabelled as a
 // completed-with-unknown-status (exit 64) run.
 const codexExitedTurnError = "codex_exited"
+
+const eventsLostMethod = "codex/eventsLost"
 
 // --------------------------------------------------------------------------
 // Internal RPC plumbing types (unexported).
@@ -304,6 +307,9 @@ type turnState struct {
 	// eventsLost is set if the reader had to drop a non-terminal frame because
 	// the consumer stalled and the inbox buffer was full (overflow policy).
 	eventsLost atomic.Bool
+	// eventsLostSignaled ensures the consumer sees at most one loss marker per
+	// turn, even if many frames are dropped.
+	eventsLostSignaled atomic.Bool
 	// inboxOnce guards closeInbox so the reader and a canceller never double
 	// close the reader->pump channel.
 	inboxOnce sync.Once
@@ -345,6 +351,20 @@ func (ts *turnState) setCodexDied(err error) {
 	})
 }
 
+func (ts *turnState) markEventsLost() {
+	ts.eventsLost.Store(true)
+}
+
+func (ts *turnState) forwardEventsLostIfNeeded() {
+	if !ts.eventsLost.Load() || !ts.eventsLostSignaled.CompareAndSwap(false, true) {
+		return
+	}
+	ts.forward(Notification{
+		Method: eventsLostMethod,
+		Params: json.RawMessage(`{"reason":"consumer stalled; notification frames were dropped"}`),
+	})
+}
+
 // startPump is the per-turn delivery goroutine. It is the only goroutine that
 // writes to and closes ts.events/ts.result, eliminating any send-vs-close race
 // on those consumer channels. It forwards notifications from inbox to events,
@@ -360,6 +380,7 @@ func (ts *turnState) startPump() {
 			select {
 			case n, ok := <-ts.inbox:
 				if !ok {
+					ts.forwardEventsLostIfNeeded()
 					// Inbox closed by the reader: natural end-of-turn. If a
 					// turn/completed was seen, finalTurn is set (the store
 					// happens-before this closed-channel observation), so emit
@@ -372,6 +393,7 @@ func (ts *turnState) startPump() {
 					}
 					return
 				}
+				ts.forwardEventsLostIfNeeded()
 				ts.forward(n)
 			case <-ts.canceled:
 				// Operator cancel: drop pending events, close channels with no
@@ -404,6 +426,7 @@ func New(cmdPath string, args []string, env []string, cwd string) *AppServer {
 		cmdArgs:    args,
 		env:        env,
 		cwd:        cwd,
+		childCtl:   newChildController(),
 		done:       make(chan struct{}),
 		readerDone: make(chan struct{}),
 		turns:      make(map[string]*turnState),
@@ -431,6 +454,7 @@ func (a *AppServer) startReader() {
 	if a.readerDone == nil {
 		a.readerDone = make(chan struct{})
 	}
+	a.readerStarted.Store(true)
 	go func() {
 		defer close(a.readerDone)
 		defer close(a.done)
@@ -508,7 +532,7 @@ func (a *AppServer) handleServerRequest(id int64, method string, _ json.RawMessa
 		"turn/approvalRequest",
 		"approvalRequest":
 		// codex's ReviewDecision enum: "approved" lets the action proceed.
-		a.sendResult(id, map[string]interface{}{"decision": "approved"})
+		a.sendResult(id, map[string]any{"decision": "approved"})
 	case
 		// Elicitation: codex asking the client for free-form input. We are
 		// non-interactive, so decline politely with an empty/declined result
@@ -516,7 +540,7 @@ func (a *AppServer) handleServerRequest(id int64, method string, _ json.RawMessa
 		"elicitation/create",
 		"input/request",
 		"elicitationRequest":
-		a.sendResult(id, map[string]interface{}{"action": "decline"})
+		a.sendResult(id, map[string]any{"action": "decline"})
 	default:
 		// Truly unknown server request: report not-implemented. This is safe
 		// for methods codex does not actually require us to handle.
@@ -526,7 +550,7 @@ func (a *AppServer) handleServerRequest(id int64, method string, _ json.RawMessa
 
 // sendResult writes a JSON-RPC success response for a server→client request.
 func (a *AppServer) sendResult(id int64, result interface{}) {
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"jsonrpc": "2.0", "id": id,
 		"result": result,
 	}
@@ -581,13 +605,7 @@ func (a *AppServer) routeNotification(n Notification) {
 
 	// Look up the turn handle by threadID (per-thread routing).
 	a.turnsMu.Lock()
-	var ts *turnState
-	for _, t := range a.turns {
-		if t.threadID == hdr.ThreadID {
-			ts = t
-			break
-		}
-	}
+	ts := a.turns[hdr.ThreadID]
 	a.turnsMu.Unlock()
 
 	if ts == nil || ts.done.Load() {
@@ -608,7 +626,6 @@ func (a *AppServer) routeNotification(n Notification) {
 		select {
 		case ts.inbox <- n:
 		default:
-			ts.eventsLost.Store(true)
 		}
 		ts.done.Store(true)
 		a.turnsMu.Lock()
@@ -625,7 +642,7 @@ func (a *AppServer) routeNotification(n Notification) {
 	select {
 	case ts.inbox <- n:
 	default:
-		ts.eventsLost.Store(true)
+		ts.markEventsLost()
 	}
 }
 
@@ -649,8 +666,11 @@ func (a *AppServer) routeNotification(n Notification) {
 func (a *AppServer) failPendingRequests(err error) {
 	a.pending.Range(func(k, v any) bool {
 		ch, _ := v.(chan *rpcResponse)
-		ch <- &rpcResponse{Error: &rpcError{Code: -32000, Message: err.Error()}}
 		a.pending.Delete(k)
+		select {
+		case ch <- &rpcResponse{Error: &rpcError{Code: -32000, Message: err.Error()}}:
+		default:
+		}
 		return true
 	})
 	a.turnsMu.Lock()
@@ -664,9 +684,9 @@ func (a *AppServer) failPendingRequests(err error) {
 }
 
 func (a *AppServer) sendError(id int64, code int, msg string) {
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"jsonrpc": "2.0", "id": id,
-		"error": map[string]interface{}{"code": code, "message": msg},
+		"error": map[string]any{"code": code, "message": msg},
 	}
 	b, _ := json.Marshal(resp)
 	a.writeMu.Lock()
@@ -759,7 +779,7 @@ func (a *AppServer) writeFrame(v interface{}) error {
 func (a *AppServer) initialize(ctx context.Context) error {
 	a.initOnce.Do(func() {
 		a.startReader()
-		params := map[string]interface{}{
+		params := map[string]any{
 			"clientInfo": map[string]string{
 				"name":    "codex-dispatch",
 				"version": pluginVersion(),
@@ -769,7 +789,7 @@ func (a *AppServer) initialize(ctx context.Context) error {
 			a.initErr = fmt.Errorf("initialize: %w", err)
 			return
 		}
-		if err := a.notify("initialized", map[string]interface{}{}); err != nil {
+		if err := a.notify("initialized", map[string]any{}); err != nil {
 			a.initErr = fmt.Errorf("initialized notification: %w", err)
 			return
 		}
@@ -780,7 +800,7 @@ func (a *AppServer) initialize(ctx context.Context) error {
 
 // pluginVersion returns the plugin version string; thin wrapper so the
 // value can be overridden in tests without messing with build flags.
-var pluginVersion = func() string { return "0.3.3" }
+var pluginVersion = func() string { return "0.5.0" }
 
 // --------------------------------------------------------------------------
 // Spawn (R2).
@@ -827,6 +847,15 @@ func (a *AppServer) Spawn(ctx context.Context) error {
 	a.stdin = stdin
 	a.stdout = stdout
 
+	// Enroll the child in its platform kill-domain (Job Object on Windows;
+	// no-op on POSIX where the process group is set via setChildProcAttr) before
+	// any turn can run a shell command, so a later reap tears down the whole
+	// subtree and a broker crash cannot orphan a danger-full-access child.
+	if err := a.ctl().arm(cmd); err != nil {
+		a.closeOnce.Do(func() { a.reapChild() })
+		return fmt.Errorf("arm child controller: %w", err)
+	}
+
 	if err := a.initialize(ctx); err != nil {
 		// Handshake failed after the child was already started. Reap it (and
 		// stop the reader goroutine started by initialize) so a failed Spawn
@@ -845,9 +874,18 @@ func (a *AppServer) Spawn(ctx context.Context) error {
 // Setpgid only (Pdeathsig is Linux-only); other OSes get a no-op. reapChild
 // covers explicit teardown on all platforms.
 
-// reapChild closes stdin/stdout, terminates the codex child, waits for it, and
-// joins the reader goroutine. Used on handshake failure and from Close. Safe to
-// call when no child was started.
+// ctl returns the platform teardown controller, lazily constructing one for
+// AppServer values built as a struct literal (some tests) rather than via New().
+func (a *AppServer) ctl() childController {
+	if a.childCtl == nil {
+		a.childCtl = newChildController()
+	}
+	return a.childCtl
+}
+
+// reapChild closes stdin/stdout, terminates the codex child subtree, waits for
+// it, and joins the reader goroutine. Used on handshake failure and from Close.
+// Safe to call when no child was started.
 func (a *AppServer) reapChild() {
 	if a.stdin != nil {
 		_ = a.stdin.Close()
@@ -859,10 +897,52 @@ func (a *AppServer) reapChild() {
 			_ = a.stdout.Close()
 		}
 		a.joinReader()
+		a.ctl().close()
 		return
 	}
-	// Best-effort graceful then forceful termination. The reader goroutine
-	// exits when the child closes stdout (EOF) or when we close it below.
+	// Best-effort graceful then forceful termination of the whole child kill-
+	// domain (process group on POSIX, Job Object on Windows). Because stdout is
+	// owned by startReader via exec.Cmd.StdoutPipe, wait for that reader to drain
+	// before calling Wait; Wait closes the pipe and can otherwise race the reader.
+	if !a.waitReader(2 * time.Second) {
+		_ = a.ctl().signal(a.cmd.Process.Pid, childSIGTERM)
+		if !a.waitReader(2 * time.Second) {
+			_ = a.ctl().signal(a.cmd.Process.Pid, childSIGKILL)
+			a.joinReader()
+		}
+	}
+	if a.stdout != nil {
+		_ = a.stdout.Close()
+	}
+	a.joinReader()
+	a.waitChild()
+	a.ctl().close()
+}
+
+// joinReader blocks until the reader goroutine has fully returned, if one was
+// started. No-op when the reader was never started.
+func (a *AppServer) joinReader() {
+	if !a.readerStarted.Load() || a.readerDone == nil {
+		return
+	}
+	_ = a.waitReader(2 * time.Second)
+}
+
+func (a *AppServer) waitReader(timeout time.Duration) bool {
+	if !a.readerStarted.Load() || a.readerDone == nil {
+		return true
+	}
+	select {
+	case <-a.readerDone:
+		return true
+	case <-time.After(timeout):
+		// The reader is wedged on a stdout read that never returns; do not block
+		// shutdown forever. This should not happen once stdout is closed.
+		return false
+	}
+}
+
+func (a *AppServer) waitChild() {
 	done := make(chan struct{})
 	go func() {
 		_ = a.cmd.Wait()
@@ -871,31 +951,13 @@ func (a *AppServer) reapChild() {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		_ = a.cmd.Process.Signal(syscall.SIGTERM)
+		_ = a.ctl().signal(a.cmd.Process.Pid, childSIGTERM)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			_ = a.cmd.Process.Kill()
+			_ = a.ctl().signal(a.cmd.Process.Pid, childSIGKILL)
 			<-done
 		}
-	}
-	if a.stdout != nil {
-		_ = a.stdout.Close()
-	}
-	a.joinReader()
-}
-
-// joinReader blocks until the reader goroutine has fully returned, if one was
-// started. No-op when the reader was never started.
-func (a *AppServer) joinReader() {
-	if a.readerDone == nil {
-		return
-	}
-	select {
-	case <-a.readerDone:
-	case <-time.After(2 * time.Second):
-		// The reader is wedged on a stdout read that never returns; do not block
-		// shutdown forever. This should not happen once stdout is closed.
 	}
 }
 
@@ -963,7 +1025,7 @@ func (a *AppServer) StartThread(ctx context.Context, opts ThreadStartOptions) (*
 	if err != nil {
 		return nil, err
 	}
-	params := map[string]interface{}{
+	params := map[string]any{
 		"approvalPolicy": "never",
 		"sandbox":        sandbox,
 	}
@@ -996,7 +1058,7 @@ func (a *AppServer) ResumeThread(ctx context.Context, threadID string, _ ThreadR
 	if !a.initialized.Load() {
 		return nil, ErrNotInitialized
 	}
-	params := map[string]interface{}{"threadId": threadID}
+	params := map[string]any{"threadId": threadID}
 	result, err := a.call(ctx, "thread/resume", params)
 	if err != nil {
 		if isStaleError(err) {
@@ -1059,10 +1121,10 @@ func (a *AppServer) StartTurn(ctx context.Context, threadID, prompt string, _ Tu
 	a.turnsMu.Unlock()
 	ts.startPump()
 
-	params := map[string]interface{}{
+	params := map[string]any{
 		"threadId":       threadID,
 		"approvalPolicy": "never",
-		"input": []map[string]interface{}{
+		"input": []map[string]any{
 			{"type": "text", "text": prompt},
 		},
 	}
@@ -1101,13 +1163,93 @@ func (a *AppServer) StartTurn(ctx context.Context, threadID, prompt string, _ Tu
 				delete(a.turns, ts.threadID)
 				a.turnsMu.Unlock()
 				ts.signalCancel()
-				_, _ = a.call(context.Background(), "turn/interrupt", map[string]interface{}{
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_, _ = a.call(ctx, "turn/interrupt", map[string]any{
 					"turnId": resp.Turn.ID,
 				})
 			}
 		},
 	}
 	return handle, nil
+}
+
+// --------------------------------------------------------------------------
+// Standalone command exec / sandbox preflight.
+// --------------------------------------------------------------------------
+
+// CommandExecResult is the buffered outcome of a command/exec RPC.
+type CommandExecResult struct {
+	ExitCode int
+	Stdout   string
+	Stderr   string
+}
+
+// sandboxPolicyForMode maps a SandboxMode enum string (as used by thread/start)
+// to the codex SandboxPolicy discriminated union that command/exec (and
+// turn/start) expect. Reports ok=false for an unknown mode. The empty string is
+// intentionally NOT mapped here — a caller that wants the dispatch default
+// should resolve it via sandboxModeString first.
+//
+// Note: thread/start's `sandbox` is a kebab-case SandboxMode enum, while
+// command/exec's `sandboxPolicy` is a discriminated union keyed on a camelCase
+// `type`. These are NOT the same shape — see ThreadStartParams vs
+// CommandExecParams in the v2 schema.
+func sandboxPolicyForMode(mode string) (map[string]any, bool) {
+	switch mode {
+	case "read-only":
+		return map[string]any{"type": "readOnly"}, true
+	case "workspace-write":
+		return map[string]any{"type": "workspaceWrite"}, true
+	case "danger-full-access":
+		return map[string]any{"type": "dangerFullAccess"}, true
+	default:
+		return nil, false
+	}
+}
+
+// CommandExec runs a standalone argv via codex's `command/exec` RPC — no thread,
+// no turn, no model — and returns the buffered exit code, stdout and stderr. A
+// nil sandboxPolicy defers to codex's configured default policy; pass one of the
+// SandboxPolicy union shapes (see sandboxPolicyForMode) to pin it. Used by the
+// broker's sandbox preflight to detect a host whose bubblewrap-based Linux
+// sandbox cannot initialize, before a real turn buries that failure in
+// per-command output while the model limps on with every shell command failing.
+func (a *AppServer) CommandExec(ctx context.Context, argv []string, sandboxPolicy any) (CommandExecResult, error) {
+	if !a.initialized.Load() {
+		return CommandExecResult{}, ErrNotInitialized
+	}
+	params := map[string]any{"command": argv}
+	if sandboxPolicy != nil {
+		params["sandboxPolicy"] = sandboxPolicy
+	}
+	raw, err := a.call(ctx, "command/exec", params)
+	if err != nil {
+		return CommandExecResult{}, fmt.Errorf("command/exec: %w", err)
+	}
+	var resp struct {
+		ExitCode int    `json:"exitCode"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return CommandExecResult{}, fmt.Errorf("command/exec response: %w", err)
+	}
+	return CommandExecResult{ExitCode: resp.ExitCode, Stdout: resp.Stdout, Stderr: resp.Stderr}, nil
+}
+
+// ProbeSandbox runs a trivial no-op (`true`) under the given sandbox MODE via
+// CommandExec, so a caller can tell whether that mode's sandbox actually starts
+// on this host. mode is a SandboxMode string; an unknown mode is rejected. On a
+// host whose bubblewrap sandbox cannot create a user namespace, codex never runs
+// the command: the returned Stderr carries the `bwrap: ...` diagnostic with a
+// nonzero ExitCode. A working sandbox runs `true` → ExitCode 0, empty Stderr.
+func (a *AppServer) ProbeSandbox(ctx context.Context, mode string) (CommandExecResult, error) {
+	policy, ok := sandboxPolicyForMode(mode)
+	if !ok {
+		return CommandExecResult{}, fmt.Errorf("unknown sandbox mode %q", mode)
+	}
+	return a.CommandExec(ctx, []string{"true"}, policy)
 }
 
 // Close releases the codex child. It closes stdin (codex's stdio-transport

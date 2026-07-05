@@ -54,6 +54,7 @@ func runBroker(_ []string, _ io.Reader, _ io.Writer, stderr io.Writer) int {
 		Table:     table,
 		CWD:       repoRoot,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		Version:   version,
 	}
 
 	// shutdown sequences teardown so a streaming handler is never severed from

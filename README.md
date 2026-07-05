@@ -11,7 +11,7 @@ Zero to a first dispatch in under five minutes.
 **1. Enable the plugin (local clone).** From a clone of this repo, register it as a local Claude Code plugin and restart Claude Code so the manifest, commands, and subagents load:
 
 ```bash
-claude plugin add ./claude-code-codex-dispatch   # path to your clone
+claude plugin add ./codex-dispatch   # path to your clone
 # then restart Claude Code
 ```
 
@@ -310,6 +310,7 @@ Common knobs are summarized below; the full, source-verified reference (broker, 
 | Variable | Default | Effect |
 |---|---|---|
 | `CODEX_SANDBOX` | `danger-full-access` | Codex sandbox policy: `read-only`, `workspace-write`, or `danger-full-access`. |
+| `CODEX_WORKDIR` | unset (auto-derived) | Pin codex's thread cwd to a module subdirectory of a `go.work` monorepo (absolute, or relative to the invocation cwd). When unset, the module is auto-derived from `CODEX_FILES` (nearest ancestor of the seeded files with a module manifest). The broker stays keyed on the repo root; only the per-thread cwd changes. Outside the repo root → falls back to the root. |
 | `CODEX_MODEL` | unset (codex default) | Pin the codex model (e.g. `gpt-5.5`); unset uses codex's configured default. |
 | `CODEX_DISPATCH_TIMEOUT_MS` | unset (no timeout) | Per-dispatch wall-clock budget in ms; on timeout the run records `exit_code: 124` in `result.json`. |
 | `CODEX_DISPATCH_BIN` | unset | Absolute path to a prebuilt binary; the launcher execs it and skips download/checksum. |
@@ -358,7 +359,7 @@ Two layers return codes from disjoint ranges. Full table in [`docs/configuration
 | **Dispatch fails right after the broker starts (app-server handshake error)** | codex-dispatch needs `codex >= 0.130.0` (the app-server protocol). Run `codex --version` and upgrade the [codex CLI](https://github.com/openai/codex) if it is older. |
 | **`codex` not found (exit 3)** | Put `codex` on `$PATH`, or point the broker at it with `CODEX_BROKER_CODEX_BIN`. |
 | **Broker won't start / stale `broker.addr`** | The dispatch path auto-heals a dead endpoint (pings, then respawns). To force a clean restart: `codex-dispatch dispatch --list`, then `rm -f .codex-dispatch/broker.addr .codex-dispatch/broker.pid` and re-dispatch. If you set `CODEX_BROKER_ADDR_PATH`, remove that path instead. |
-| **Codex sandbox-denied errors** | Default is `CODEX_SANDBOX=danger-full-access`. Valid values are `read-only`, `workspace-write`, `danger-full-access`; anything else fails with exit `64`. |
+| **Codex sandbox-denied / `bwrap: setting up uid map: Permission denied`** | Codex's Linux sandbox uses bubblewrap, which needs unprivileged user namespaces. On hosts that restrict them (e.g. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), `read-only`/`workspace-write` can't start the sandbox. The default `CODEX_SANDBOX=danger-full-access` skips the sandbox and is unaffected. If you request a sandboxed mode on such a host, the dispatch now **fails fast** (exit `64`) with an actionable message rather than letting every shell command fail cryptically — either use `danger-full-access`, or lift the restriction (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Any other `CODEX_SANDBOX` value fails validation with exit `64`. |
 | **Network failure downloading the binary (exit 7)** | Offline-install: download `codex-dispatch_<os>-<arch>.tar.gz` + `checksums.txt` from the [releases page](https://github.com/semanta-dev/codex-dispatch/releases) into `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/` and re-run, or set `CODEX_DISPATCH_BIN` to a prebuilt binary. |
 | **Run reports `exit_code: 4` (no meaningful edits)** | The turn produced no repo edits. Tighten the task/acceptance, add relevant `--files`, and re-dispatch. (This is a `result.json` value, not a process exit code; detached runs never report it.) |
 

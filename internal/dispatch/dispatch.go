@@ -4,6 +4,7 @@ package dispatch
 
 import (
 	"os/exec"
+	"path/filepath"
 )
 
 // Env is the typed view of the CODEX_* environment for the dispatch subcommand.
@@ -40,6 +41,21 @@ func EnvFromOS(getenv func(string) string) Env {
 		ResultDir:       getenv("CODEX_RESULT_DIR"),
 		ConventionsFile: getenv("CODEX_CONVENTIONS_FILE"),
 	}
+}
+
+// ResolveWorkDir applies the CODEX_WORKDIR override to the process cwd. An
+// absolute override is used as-is; a relative one is resolved under cwd; an
+// unset override leaves cwd unchanged. The result seeds Env.WorkDir, which
+// run.go may further narrow via monorepo auto-scoping.
+func ResolveWorkDir(cwd string, getenv func(string) string) string {
+	wd := getenv("CODEX_WORKDIR")
+	if wd == "" {
+		return cwd
+	}
+	if filepath.IsAbs(wd) {
+		return wd
+	}
+	return filepath.Join(cwd, wd)
 }
 
 // newGit is a small helper for tests; production code uses internal/diff and

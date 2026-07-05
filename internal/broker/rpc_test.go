@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,42 @@ func TestReadLineStripsCRLF(t *testing.T) {
 	}
 	if string(line) != "foo" {
 		t.Fatalf("line = %q, want %q", line, "foo")
+	}
+}
+
+func TestReadLineReturnsPartialLineAtEOF(t *testing.T) {
+	r := bufio.NewReader(bytes.NewReader([]byte("hello")))
+	line, err := ReadLine(r)
+	if err != nil {
+		t.Fatalf("ReadLine: %v", err)
+	}
+	if string(line) != "hello" {
+		t.Fatalf("line = %q, want %q", line, "hello")
+	}
+	_, err = ReadLine(r)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want io.EOF", err)
+	}
+}
+
+func TestReadLineReturnsTerminatedThenPartialLine(t *testing.T) {
+	r := bufio.NewReader(bytes.NewReader([]byte("foo\nbar")))
+	line, err := ReadLine(r)
+	if err != nil {
+		t.Fatalf("first ReadLine: %v", err)
+	}
+	if string(line) != "foo" {
+		t.Fatalf("first line = %q, want %q", line, "foo")
+	}
+	line, err = ReadLine(r)
+	if err != nil {
+		t.Fatalf("second ReadLine: %v", err)
+	}
+	if string(line) != "bar" {
+		t.Fatalf("second line = %q, want %q", line, "bar")
+	}
+	_, err = ReadLine(r)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want io.EOF", err)
 	}
 }

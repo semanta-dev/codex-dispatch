@@ -41,6 +41,12 @@ func HandleSessionDeregister(state *BrokerState) Handler {
 		if ids == nil {
 			ids = []string{}
 		}
+		// Cancel each newly-cancelled queued task's per-task context so a codex
+		// turn that was about to start (or a queued task holding resources) is
+		// released promptly rather than lingering until the broker notices.
+		for _, id := range ids {
+			state.cancelTask(id)
+		}
 		return map[string]any{"cancelled_task_ids": ids}, nil
 	}
 }

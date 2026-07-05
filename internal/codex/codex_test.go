@@ -25,7 +25,7 @@ func TestFreshOutsideGitRepoReturnsError(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, err = Fresh(context.Background(), "x", "workspace-write", "", filepath.Join(tmp, "stdout.log"))
+	_, err = Fresh(context.Background(), "x", "workspace-write", "", filepath.Join(tmp, "stdout.log"), tmp)
 	if err == nil {
 		t.Fatalf("Fresh outside a git repo should return error")
 	}
@@ -43,7 +43,7 @@ func TestResumeOutsideGitRepoReturnsError(t *testing.T) {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
-	_, err = Resume(context.Background(), "prev-sess", "x", "workspace-write", "", filepath.Join(tmp, "stdout.log"))
+	_, err = Resume(context.Background(), "prev-sess", "x", "workspace-write", "", filepath.Join(tmp, "stdout.log"), tmp)
 	if err == nil {
 		t.Fatalf("Resume outside a git repo should return error")
 	}
@@ -56,12 +56,45 @@ func TestFreshCancelledContextReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	tmp := t.TempDir()
-	_, err := Fresh(ctx, "x", "workspace-write", "", filepath.Join(tmp, "stdout.log"))
+	_, err := Fresh(ctx, "x", "workspace-write", "", filepath.Join(tmp, "stdout.log"), tmp)
 	if err == nil {
 		t.Fatalf("Fresh with cancelled ctx should return error")
 	}
 	if err != context.Canceled {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// TestThreadCWD covers the escape-guarded per-thread cwd selection: empty and
+// outside-root workDirs fall back to the repo root; a submodule inside the root
+// is honored; a parent-directory escape falls back.
+func TestThreadCWD(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "server")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := t.TempDir()
+
+	cases := []struct {
+		name    string
+		workDir string
+		want    string
+	}{
+		{"empty falls back to root", "", root},
+		{"root stays root", root, root},
+		{"submodule is honored", sub, sub},
+		{"outside root falls back", outside, root},
+		{"parent escape falls back", filepath.Dir(root), root},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := threadCWD(root, tc.workDir)
+			wantAbs, _ := filepath.Abs(tc.want)
+			if got != wantAbs {
+				t.Fatalf("threadCWD(%q, %q) = %q, want %q", root, tc.workDir, got, wantAbs)
+			}
+		})
 	}
 }
 

@@ -734,3 +734,170 @@ func TestWedgedTurnHitsPerTurnDeadline(t *testing.T) {
 		t.Fatalf("running_count = %d after deadline, want 0 (slot not freed)", ping.RunningCount)
 	}
 }
+
+func TestDispatchRunSandboxPreflightFailsFast(t *testing.T) {
+	repoDir := t.TempDir()
+	logPath := filepath.Join(repoDir, "stdout.log")
+	rpcLog := filepath.Join(repoDir, "rpc.log")
+	setupFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":          "0.130.0",
+		"FAKE_APPSERVER_SESSION":      "thread-x",
+		"FAKE_APPSERVER_RPC_LOG":      rpcLog,
+		"FAKE_APPSERVER_BWRAP_BROKEN": "1",
+	})
+
+	table := NewTable(8, 2048)
+	state := &BrokerState{Table: table, CWD: repoDir}
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	srv := NewServer("")
+	srv.HandleFunc("dispatch.run", HandleDispatchRun(state))
+	go srv.serveConn(context.Background(), c1)
+	client := NewClientFromConn(c2)
+
+	result, err := client.DispatchRun(context.Background(), DispatchRunParams{
+		SessionID: "s",
+		Mode:      "fresh",
+		Prompt:    "do thing",
+		Sandbox:   "workspace-write",
+		LogPath:   logPath,
+	}, func(ev DispatchEvent) {})
+	if err != nil {
+		t.Fatalf("DispatchRun: %v", err)
+	}
+	if result.ExitCode != 64 || result.State != string(StateErrored) {
+		t.Fatalf("result = {exit:%d state:%q}, want {64 errored}", result.ExitCode, result.State)
+	}
+	// The message must steer the operator to the working fix and quote codex's
+	// own diagnostic.
+	for _, want := range []string{"danger-full-access", "bwrap", "workspace-write"} {
+		if !strings.Contains(result.ErrorMessage, want) {
+			t.Fatalf("error message %q missing %q", result.ErrorMessage, want)
+		}
+	}
+	// stdout.log carries the broker-side explanation.
+	raw, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(raw), "broker/dispatch/error") {
+		t.Fatalf("stdout.log missing broker error: %s", raw)
+	}
+	// Fail-fast: the probe ran, but NO thread/turn was ever started.
+	rpc, _ := os.ReadFile(rpcLog)
+	if !strings.Contains(string(rpc), "command/exec") {
+		t.Fatalf("expected a command/exec probe in rpc log:\n%s", rpc)
+	}
+	if strings.Contains(string(rpc), "thread/start") || strings.Contains(string(rpc), "turn/start") {
+		t.Fatalf("dispatch should not start a thread/turn after a failed preflight:\n%s", rpc)
+	}
+}
+
+func TestDispatchRunSandboxPreflightSkippedForDangerFullAccess(t *testing.T) {
+	repoDir := t.TempDir()
+	logPath := filepath.Join(repoDir, "stdout.log")
+	rpcLog := filepath.Join(repoDir, "rpc.log")
+	setupFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":          "0.130.0",
+		"FAKE_APPSERVER_SESSION":      "thread-dfa",
+		"FAKE_APPSERVER_RPC_LOG":      rpcLog,
+		"FAKE_APPSERVER_BWRAP_BROKEN": "1",
+	})
+
+	table := NewTable(8, 2048)
+	state := &BrokerState{Table: table, CWD: repoDir}
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	srv := NewServer("")
+	srv.HandleFunc("dispatch.run", HandleDispatchRun(state))
+	go srv.serveConn(context.Background(), c1)
+	client := NewClientFromConn(c2)
+
+	result, err := client.DispatchRun(context.Background(), DispatchRunParams{
+		SessionID: "s",
+		Mode:      "fresh",
+		Prompt:    "do thing",
+		Sandbox:   "danger-full-access",
+		LogPath:   logPath,
+	}, func(ev DispatchEvent) {})
+	if err != nil {
+		t.Fatalf("DispatchRun: %v", err)
+	}
+	if result.ExitCode != 0 || result.SessionID != "thread-dfa" {
+		t.Fatalf("result = {exit:%d session:%q}, want {0 thread-dfa}", result.ExitCode, result.SessionID)
+	}
+	if rpc, _ := os.ReadFile(rpcLog); strings.Contains(string(rpc), "command/exec") {
+		t.Fatalf("danger-full-access must not trigger a sandbox probe:\n%s", rpc)
+	}
+}
+
+func TestDispatchRunDropsRealThreadStartedAndSynthesizesOne(t *testing.T) {
+	repoDir := t.TempDir()
+	logPath := filepath.Join(repoDir, "stdout.log")
+	setupFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":     "0.130.0",
+		"FAKE_APPSERVER_SESSION": "thread-synth",
+	})
+
+	table := NewTable(8, 2048)
+	state := &BrokerState{Table: table, CWD: repoDir}
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	srv := NewServer("")
+	srv.HandleFunc("dispatch.run", HandleDispatchRun(state))
+	go srv.serveConn(context.Background(), c1)
+	client := NewClientFromConn(c2)
+
+	var callbackThreadStarted []DispatchEvent
+	result, err := client.DispatchRun(context.Background(), DispatchRunParams{
+		SessionID: "s",
+		Mode:      "fresh",
+		Prompt:    "t",
+		Sandbox:   "workspace-write",
+		LogPath:   logPath,
+	}, func(ev DispatchEvent) {
+		if ev.Type == "thread/started" {
+			callbackThreadStarted = append(callbackThreadStarted, ev)
+		}
+	})
+	if err != nil {
+		t.Fatalf("DispatchRun: %v", err)
+	}
+	if len(callbackThreadStarted) != 1 {
+		t.Fatalf("callback thread/started count = %d, want exactly synthesized one: %+v", len(callbackThreadStarted), callbackThreadStarted)
+	}
+	if !strings.Contains(string(callbackThreadStarted[0].Payload), `"id":"thread-synth"`) {
+		t.Fatalf("synthesized callback payload missing thread id: %s", callbackThreadStarted[0].Payload)
+	}
+
+	evs, err := table.Events(result.TaskID, 1)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	var tableThreadStarted int
+	for _, ev := range evs {
+		if ev.Type == "thread/started" {
+			tableThreadStarted++
+			if !strings.Contains(string(ev.Payload), `"id":"thread-synth"`) {
+				t.Fatalf("synthesized table payload missing thread id: %s", ev.Payload)
+			}
+		}
+	}
+	if tableThreadStarted != 1 {
+		t.Fatalf("table thread/started count = %d, want exactly synthesized one: %+v", tableThreadStarted, evs)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if got := strings.Count(string(raw), `"method":"thread/started"`); got != 1 {
+		t.Fatalf("log thread/started count = %d, want exactly synthesized one:\n%s", got, raw)
+	}
+	if !strings.Contains(string(raw), `"id":"thread-synth"`) {
+		t.Fatalf("log synthesized thread/started missing thread id:\n%s", raw)
+	}
+}

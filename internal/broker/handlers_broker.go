@@ -13,6 +13,10 @@ import (
 	"github.com/semanta-dev/codex-dispatch/internal/codex/appserver"
 )
 
+// BrokerAPIVersion is the default broker version reported by broker.ping when
+// the build version has not been wired into BrokerState.Version.
+const BrokerAPIVersion = "1.0.0"
+
 // BrokerState bundles the dependencies handlers need. Passed by reference to
 // the handler factories so we can wire them once in the broker subcommand.
 type BrokerState struct {
@@ -20,6 +24,7 @@ type BrokerState struct {
 	StartedAt string           // RFC3339 UTC
 	Shutdown  func(force bool) // signals the server to exit; force=true cancels running tasks first
 	CWD       string           // working directory passed to spawned codex children
+	Version   string           // codex-dispatch build version reported by broker.ping (falls back to BrokerAPIVersion)
 
 	schedulerOnce sync.Once
 	scheduler     chan struct{}
@@ -156,8 +161,12 @@ func turnTimeout() time.Duration {
 func HandleBrokerPing(state *BrokerState) Handler {
 	return func(_ context.Context, _ json.RawMessage) (any, error) {
 		all := state.Table.List("")
+		version := state.Version
+		if version == "" {
+			version = BrokerAPIVersion
+		}
 		return map[string]any{
-			"version":       "1.0.0",
+			"version":       version,
 			"started_at":    state.StartedAt,
 			"task_count":    len(all),
 			"running_count": state.Table.RunningCount(),

@@ -520,8 +520,18 @@ func (t *Table) RunningCount() int {
 }
 
 // AppendEvent records an event for the given task and returns its sequence
-// number (monotonic per task starting at 1).
+// number (monotonic per task starting at 1). It defensively copies payload;
+// callers that own a freshly-allocated buffer they will not mutate can use
+// appendEventOwned to skip the copy on the hot streaming path.
 func (t *Table) AppendEvent(id, eventType string, payload []byte) (int64, error) {
+	return t.appendEventOwned(id, eventType, append([]byte(nil), payload...))
+}
+
+// appendEventOwned is AppendEvent without the defensive payload copy: it stores
+// the caller's slice directly, so the caller MUST NOT mutate payload after this
+// returns. The dispatch drain uses it for per-event buffers it decodes fresh and
+// never reuses, avoiding a copy per streamed notification.
+func (t *Table) appendEventOwned(id, eventType string, payload []byte) (int64, error) {
 	t.mu.Lock()
 	rec, ok := t.tasks[id]
 	if !ok {
@@ -529,7 +539,7 @@ func (t *Table) AppendEvent(id, eventType string, payload []byte) (int64, error)
 		return 0, ErrTaskNotFound
 	}
 	rec.totalEv++
-	rec.events[rec.head] = Event{Seq: int64(rec.totalEv), Type: eventType, Payload: append([]byte(nil), payload...)}
+	rec.events[rec.head] = Event{Seq: int64(rec.totalEv), Type: eventType, Payload: payload}
 	rec.head = (rec.head + 1) % len(rec.events)
 	rec.task.EventCount = rec.totalEv
 	seq := int64(rec.totalEv)

@@ -1,6 +1,6 @@
 {
   "name": "codex-dispatch",
-  "version": "0.3.3",
+  "version": "0.5.0",
   "description": "Delegate well-scoped coding tasks to the local OpenAI Codex CLI agent and review its output through a structured verdict loop. Exposes /codex, /codex-orchestrate, GraphRAG packet dispatch, and subagents over a shared dispatch core.",
   "author": {
     "name": "Jordan Dziat",
