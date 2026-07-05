@@ -452,3 +452,25 @@ _codex_wait_terminal() {
   grep -qE $'^command/exec\t' "$rpc_log"
   run ! grep -qE $'^turn/start\t' "$rpc_log"
 }
+
+@test "dispatch disables codex's configured MCP servers by default" {
+  local argv="$TEST_REPO/appserver-argv.txt"
+  export FAKE_APPSERVER_MCP_SERVERS="playwright,semanta"
+  export FAKE_APPSERVER_RECORD_ARGV="$argv"
+  run "$DISPATCH"
+  [ "$status" -eq 0 ]
+  # The broker enumerated the servers and passed a -c disable for each to the
+  # spawned app-server.
+  grep -qF "mcp_servers.playwright.enabled=false" "$argv"
+  grep -qF "mcp_servers.semanta.enabled=false" "$argv"
+}
+
+@test "CODEX_DISPATCH_KEEP_MCP=1 leaves codex's MCP servers enabled" {
+  local argv="$TEST_REPO/appserver-argv.txt"
+  export FAKE_APPSERVER_MCP_SERVERS="playwright,semanta"
+  export FAKE_APPSERVER_RECORD_ARGV="$argv"
+  export CODEX_DISPATCH_KEEP_MCP=1
+  run "$DISPATCH"
+  [ "$status" -eq 0 ]
+  run ! grep -qF "mcp_servers." "$argv"
+}

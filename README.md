@@ -314,6 +314,7 @@ Common knobs are summarized below; the full, source-verified reference (broker, 
 | `CODEX_MODEL` | unset (codex default) | Pin the codex model (e.g. `gpt-5.5`); unset uses codex's configured default. |
 | `CODEX_DISPATCH_TIMEOUT_MS` | unset (no timeout) | Per-dispatch wall-clock budget in ms; on timeout the run records `exit_code: 124` in `result.json`. |
 | `CODEX_DISPATCH_BIN` | unset | Absolute path to a prebuilt binary; the launcher execs it and skips download/checksum. |
+| `CODEX_DISPATCH_KEEP_MCP` | unset (MCP disabled) | By default a dispatched codex runs with its configured MCP servers disabled so it focuses on the repo and can't stall on a failing MCP/web tool; set to any non-empty value to keep them enabled. |
 | `CODEX_CONVENTIONS_FILE` | auto-detected | Conventions file injected into Codex's prompt. |
 | `CODEX_FILES` | unset | Comma-separated relevant file paths seeded into the prompt. |
 | `CODEX_RESULT_DIR` | `<repo>/.codex-dispatch/runs/<ts>-<pid>/` | Override the run-artifact directory. |
