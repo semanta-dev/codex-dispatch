@@ -35,9 +35,9 @@ jobs:
       - name: go test (race stressors — concurrency-heavy packages)
         run: go test -race -count=20 ./internal/broker/ ./internal/codex/appserver/
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: "~> v2"
+          version: v2.8.0
 
   shell:
     runs-on: ubuntu-latest
