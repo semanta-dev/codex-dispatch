@@ -93,11 +93,50 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		fmt.Fprintf(stdout, "codex-cli %s\n", v)
 		return 0
 	case "app-server":
+		// Record the full argv so a test can assert the broker's -c overrides
+		// (e.g. the MCP-disable flags) reached the spawned app-server.
+		if rec := getenv("FAKE_APPSERVER_RECORD_ARGV"); rec != "" {
+			_ = os.WriteFile(rec, []byte(strings.Join(argv, "\n")), 0o644)
+		}
 		return runAppServer(stdin, stdout, stderr, getenv)
+	case "mcp":
+		// Emulate `codex mcp list --json` so the broker's MCP-disable enumeration
+		// has servers to read. FAKE_APPSERVER_MCP_SERVERS is a comma-separated list
+		// of server names (empty → no servers).
+		if len(argv) >= 3 && argv[2] == "list" {
+			fmt.Fprint(stdout, mcpListJSON(splitCSVList(getenv("FAKE_APPSERVER_MCP_SERVERS"))))
+			return 0
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "fake-codex: unknown subcommand %q\n", argv[1])
 		return 64
 	}
+}
+
+// mcpListJSON renders the subset of `codex mcp list --json` the broker reads: an
+// array of {name, enabled} objects.
+func mcpListJSON(names []string) string {
+	type srv struct {
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
+	}
+	list := make([]srv, 0, len(names))
+	for _, n := range names {
+		list = append(list, srv{Name: n, Enabled: true})
+	}
+	b, _ := json.Marshal(list)
+	return string(b)
+}
+
+func splitCSVList(s string) []string {
+	out := []string{}
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func runAppServer(stdin io.Reader, stdout, _ io.Writer, getenv func(string) string) int {
