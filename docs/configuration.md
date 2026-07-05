@@ -20,6 +20,7 @@ aspirational — if a knob is listed, the binary or a script reads it.
 | Variable | Default | Effect |
 |---|---|---|
 | `CODEX_SANDBOX` | `danger-full-access` | Codex sandbox policy. One of `read-only`, `workspace-write`, `danger-full-access`. Any other value fails validation (exit `64`). |
+| `CODEX_WORKDIR` | unset (auto-derived) | Directory codex should treat as its thread cwd. Used as-is if absolute, else resolved relative to the invocation cwd. Lets you pin a dispatch to a module subdirectory of a `go.work` monorepo (one git repo at the parent, modules like `./shared ./server` beneath it) without changing process cwd. **When unset and the dispatch is invoked at the repo root, the module is auto-derived from `CODEX_FILES`** — codex runs in the nearest ancestor of all seeded files that carries a module manifest (`go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json`, `build.gradle`, `pom.xml`); files spanning two modules (or none with a sub-manifest) stay at the repo root. The broker is still keyed on the repo root (one broker per repo); only codex's per-thread cwd changes. A value outside the repo root falls back to the repo root. |
 | `CODEX_MODEL` | unset (codex default) | Pin the codex model for the dispatch (e.g. `gpt-5.5`); passed through to the app-server `thread/start`. When unset, codex uses its configured default. Set this to match the model your `codex exec` uses when you need consistent behavior (e.g. image/vision reads). |
 | `CODEX_DISPATCH_TIMEOUT_MS` | unset (no timeout) | Per-dispatch wall-clock budget in milliseconds. On timeout the run returns promptly with `exit_code: 124` recorded in `result.json`. A missing/zero/invalid value means no timeout. |
 | `CODEX_DISPATCH_BIN` | unset | Escape hatch: absolute path to a prebuilt `codex-dispatch` binary. When set and executable, the launcher (`scripts/dispatch-codex.sh`) execs it directly and skips the download/checksum path. Used for local dev and CI. |
@@ -126,9 +127,9 @@ distinct from the binary's `0/2/3/64`.
 
 | Code | Meaning |
 |---|---|
-| `5` | Checksum mismatch (or `checksums.txt` has no entry for the platform tarball). |
-| `6` | Required tool missing (`tar`, `curl`/`wget`, `sha256sum`/`shasum`), unsupported OS/arch, or missing `VERSION` file. |
-| `7` | Network unreachable while downloading the tarball or `checksums.txt`. |
+| `5` | Checksum mismatch (or `checksums.txt` has no entry for the platform archive). |
+| `6` | Required tool missing (`tar` — or `unzip` on Windows —, `curl`/`wget`, `sha256sum`/`shasum`), unsupported OS/arch, or missing `VERSION` file. |
+| `7` | Network unreachable while downloading the archive or `checksums.txt`. |
 | `8` | Tarball corrupt despite a matching checksum (extraction failed or the archive is missing the binary). |
 
 The other helper scripts (`pick-iterations.sh`, `capture-diff.sh`) exit `6`
@@ -199,11 +200,23 @@ sandbox failures in plugin launches. If you set a stricter policy and hit
 sandbox-denied errors, the valid values are `read-only`, `workspace-write`,
 and `danger-full-access`; anything else fails validation with exit `64`.
 
+Codex's Linux sandbox uses **bubblewrap**, which needs unprivileged user
+namespaces. On hosts that restrict them — e.g. Ubuntu with
+`kernel.apparmor_restrict_unprivileged_userns=1` — a `read-only` or
+`workspace-write` run cannot start the sandbox and every shell command inside a
+turn fails with `bwrap: setting up uid map: Permission denied`. To avoid burying
+that in per-command output, the broker runs a one-shot `command/exec` preflight
+before starting the turn: when the requested sandboxed mode can't initialize, the
+dispatch **fails fast** with exit `64` and an actionable message. The default
+`danger-full-access` never invokes bubblewrap, so it is skipped by the preflight
+and unaffected. Fixes: use `danger-full-access`, or lift the host restriction
+with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
 ### Network failure during binary download (exit 7)
 
 The launcher downloads the `codex-dispatch` binary from GitHub Releases on
 first use. If the network is unreachable, install offline: download
-`codex-dispatch_<os>-<arch>.tar.gz` and `checksums.txt` from the
+`codex-dispatch_<os>-<arch>.tar.gz` (`.zip` on Windows) and `checksums.txt` from the
 [release page](https://github.com/semanta-dev/codex-dispatch/releases),
 place them in
 `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/`, then
@@ -217,3 +230,72 @@ produced explanatory text or runtime-only artifacts). Tighten the task and
 acceptance criteria, or supply relevant `--files`, and re-dispatch. This is a
 `result.json` value, not a process exit code; detached runs never report it
 (no diff is computed).
+### Codex's edits vanished after I aborted a run
+
+This is codex's turn model, not codex-dispatch reverting your tree: the dispatch
+core never runs `git clean`/`checkout`/`restore`/`reset`/`stash` against the
+working tree (only the opt-in `--isolation worktree` and `--clean-verify` paths
+touch git, and they operate on separate worktree directories). Codex treats a
+**turn atomically** — when you abort, codex-dispatch sends `turn/interrupt` and
+codex rolls back the in-progress turn, undoing the files it was creating.
+
+The work is recoverable: every run's `stdout.log` records the turn's
+`turn/diff/updated` events, the last of which is a full unified diff. Recover it
+with:
+
+```bash
+log=$(ls -t .codex-dispatch/runs/*/stdout.log | head -1)   # newest run
+grep '"method":"turn/diff/updated"' "$log" | tail -1 \
+  | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['params']['diff'])" \
+  | git apply
+```
+
+To avoid the rollback, let the turn complete instead of aborting (completion is
+what persists the diff).
+
+### Untracked files disappeared during parallel / multi-agent work
+
+A codex turn (completed *or* aborted) does **not** delete a bystander's untracked
+or uncommitted files — this was verified empirically: an untracked file and an
+uncommitted edit both survive a concurrent dispatch in the same tree. So when a
+peer's untracked work vanishes during parallel agents, codex-dispatch is not the
+cause. The real culprits are:
+
+- **Claude Code git worktrees.** A subagent running under worktree isolation
+  (`Agent` with `isolation: worktree`, the `EnterWorktree` tool, or the
+  `parallel-subagents` skill) writes into `.claude/worktrees/…`. A `Write` there
+  succeeds but the files are not in your main checkout, and are removed when the
+  worktree is torn down.
+- **A direct `git` command** (`git clean -fd`, `git checkout`, `git reset
+  --hard`, `git stash`) run by some agent via Bash — these wipe untracked files
+  from any source.
+
+Untracked files are unprotected against all of the above. The durable guard is to
+**commit (or `git add`) work before any concurrent or destructive operation** —
+committed files survive `git clean` and worktree teardown — and to coordinate
+parallel agents (e.g. claim → commit → release) rather than co-write a shared
+tree with uncommitted state.
+
+To hard-block worktree creation in Claude Code entirely (so no agent or skill can
+spin one up), add to `~/.claude/settings.json` (global) or a project
+`.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "deny": ["EnterWorktree", "Agent(isolation:worktree)"]
+  },
+  "hooks": {
+    "WorktreeCreate": [
+      { "hooks": [ { "type": "command",
+        "command": "echo 'git worktrees are disabled by user policy' >&2; exit 1" } ] }
+    ]
+  }
+}
+```
+
+The `permissions.deny` rules remove `EnterWorktree` from Claude's context and
+reject any subagent requesting worktree isolation; the `WorktreeCreate` hook is
+the catch-all backstop (any non-zero exit aborts creation). Normal and parallel
+subagent dispatch is unaffected — only worktree isolation is blocked, and
+subagents run in the shared working tree on the current branch.

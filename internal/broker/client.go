@@ -206,6 +206,94 @@ type DispatchEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
+type taskEventAssembly struct {
+	taskID string
+	seq    int64
+	typ    string
+	total  int
+	parts  [][]byte
+}
+
+type taskEventReassembler struct {
+	chunks map[string]*taskEventAssembly
+}
+
+func (r *taskEventReassembler) handle(method string, params json.RawMessage, onEvent func(DispatchEvent)) (bool, error) {
+	switch method {
+	case "task.event":
+		if onEvent != nil {
+			var ev DispatchEvent
+			if err := json.Unmarshal(params, &ev); err == nil {
+				onEvent(ev)
+			}
+		}
+		return true, nil
+	case taskEventChunkMethod:
+		var chunk taskEventChunkParams
+		if err := json.Unmarshal(params, &chunk); err != nil {
+			return true, fmt.Errorf("decode task.event chunk: %w", err)
+		}
+		ev, err := r.addChunk(chunk)
+		if err != nil {
+			return true, err
+		}
+		if ev != nil && onEvent != nil {
+			onEvent(*ev)
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (r *taskEventReassembler) addChunk(chunk taskEventChunkParams) (*DispatchEvent, error) {
+	if chunk.ChunkID == "" {
+		return nil, fmt.Errorf("invalid task.event chunk: missing chunk_id")
+	}
+	if chunk.TotalChunks <= 0 {
+		return nil, fmt.Errorf("invalid task.event chunk %s: total_chunks=%d", chunk.ChunkID, chunk.TotalChunks)
+	}
+	if chunk.ChunkIndex < 0 || chunk.ChunkIndex >= chunk.TotalChunks {
+		return nil, fmt.Errorf("invalid task.event chunk %s: chunk_index=%d total_chunks=%d", chunk.ChunkID, chunk.ChunkIndex, chunk.TotalChunks)
+	}
+	if r.chunks == nil {
+		r.chunks = map[string]*taskEventAssembly{}
+	}
+	a := r.chunks[chunk.ChunkID]
+	if a == nil {
+		if chunk.ChunkIndex != 0 {
+			return nil, fmt.Errorf("invalid task.event chunk %s: gap before chunk %d", chunk.ChunkID, chunk.ChunkIndex)
+		}
+		a = &taskEventAssembly{
+			taskID: chunk.TaskID,
+			seq:    chunk.Seq,
+			typ:    chunk.Type,
+			total:  chunk.TotalChunks,
+		}
+		r.chunks[chunk.ChunkID] = a
+	}
+	if a.taskID != chunk.TaskID || a.seq != chunk.Seq || a.typ != chunk.Type || a.total != chunk.TotalChunks {
+		return nil, fmt.Errorf("invalid task.event chunk %s: metadata mismatch", chunk.ChunkID)
+	}
+	if chunk.ChunkIndex < len(a.parts) {
+		return nil, fmt.Errorf("invalid task.event chunk %s: duplicate chunk %d", chunk.ChunkID, chunk.ChunkIndex)
+	}
+	if chunk.ChunkIndex != len(a.parts) {
+		return nil, fmt.Errorf("invalid task.event chunk %s: gap before chunk %d", chunk.ChunkID, chunk.ChunkIndex)
+	}
+	a.parts = append(a.parts, append([]byte(nil), chunk.Payload...))
+	if len(a.parts) != a.total {
+		return nil, nil
+	}
+	delete(r.chunks, chunk.ChunkID)
+	return &DispatchEvent{
+		TaskID:  a.taskID,
+		Seq:     a.seq,
+		Type:    a.typ,
+		Payload: json.RawMessage(bytes.Join(a.parts, nil)),
+	}, nil
+}
+
 // DispatchRun calls dispatch.run, delivering task.event notifications to
 // the callback (nil drops them) and returning the final
 // DispatchRunResult. Mirrors rawCall's deadline + cancel handling.
@@ -213,18 +301,10 @@ func (c *Client) DispatchRun(ctx context.Context, p DispatchRunParams, onEvent f
 	if c.endpoint != "" {
 		return c.dispatchRunHTTP(ctx, p, onEvent)
 	}
-	id := atomic.AddInt64(&c.nextID, 1)
-	envelope := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "dispatch.run",
-		"params":  p,
-		"id":      id,
-	}
-	raw, err := json.Marshal(envelope)
+	id, raw, err := c.marshalRequest("dispatch.run", p)
 	if err != nil {
 		return nil, err
 	}
-	raw = append(raw, '\n')
 
 	c.mu.Lock()
 	_, werr := c.conn.Write(raw)
@@ -247,6 +327,7 @@ func (c *Client) DispatchRun(ctx context.Context, p DispatchRunParams, onEvent f
 		}
 	}()
 
+	reassembler := &taskEventReassembler{}
 	for {
 		line, err := ReadLine(c.reader)
 		if err != nil {
@@ -270,12 +351,9 @@ func (c *Client) DispatchRun(ctx context.Context, p DispatchRunParams, onEvent f
 		if msg.ProtocolVersion != "" && msg.ProtocolVersion != ProtocolVersion {
 			return nil, fmt.Errorf("protocol version mismatch: server says %q, client speaks %q", msg.ProtocolVersion, ProtocolVersion)
 		}
-		if msg.Method == "task.event" {
-			if onEvent != nil {
-				var ev DispatchEvent
-				if err := json.Unmarshal(msg.Params, &ev); err == nil {
-					onEvent(ev)
-				}
+		if handled, err := reassembler.handle(msg.Method, msg.Params, onEvent); handled {
+			if err != nil {
+				return nil, err
 			}
 			continue
 		}
@@ -307,18 +385,10 @@ func (c *Client) rawCall(ctx context.Context, method string, params any) (json.R
 	if c.endpoint != "" {
 		return c.rawCallHTTP(ctx, method, params)
 	}
-	id := atomic.AddInt64(&c.nextID, 1)
-	envelope := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
-		"id":      id,
-	}
-	raw, err := json.Marshal(envelope)
+	id, raw, err := c.marshalRequest(method, params)
 	if err != nil {
 		return nil, err
 	}
-	raw = append(raw, '\n')
 
 	c.mu.Lock()
 	_, werr := c.conn.Write(raw)
@@ -489,6 +559,7 @@ func (c *Client) dispatchRunHTTP(ctx context.Context, p DispatchRunParams, onEve
 	defer resp.Body.Close()
 
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
+	reassembler := &taskEventReassembler{}
 	for {
 		line, err := ReadLine(reader)
 		if err != nil {
@@ -512,12 +583,9 @@ func (c *Client) dispatchRunHTTP(ctx context.Context, p DispatchRunParams, onEve
 		if msg.ProtocolVersion != "" && msg.ProtocolVersion != ProtocolVersion {
 			return nil, fmt.Errorf("protocol version mismatch: server says %q, client speaks %q", msg.ProtocolVersion, ProtocolVersion)
 		}
-		if msg.Method == "task.event" {
-			if onEvent != nil {
-				var ev DispatchEvent
-				if err := json.Unmarshal(msg.Params, &ev); err == nil {
-					onEvent(ev)
-				}
+		if handled, err := reassembler.handle(msg.Method, msg.Params, onEvent); handled {
+			if err != nil {
+				return nil, err
 			}
 			continue
 		}

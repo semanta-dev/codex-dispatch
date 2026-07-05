@@ -5,7 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
+
+// formatTaskTimestamp renders a task timestamp as RFC3339 in UTC. Callers omit
+// the field entirely for a zero time (e.g. a queued task has no started_at yet)
+// rather than emitting a misleading zero-value timestamp.
+func formatTaskTimestamp(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
 
 // HandleTaskList returns a Handler for task.list.
 func HandleTaskList(state *BrokerState) Handler {
@@ -22,12 +30,14 @@ func HandleTaskList(state *BrokerState) Handler {
 		out := make([]map[string]any, 0, len(tasks))
 		for _, task := range tasks {
 			entry := map[string]any{
-				"task_id":    task.ID,
-				"state":      string(task.State),
-				"started_at": task.StartedAt.Format("2006-01-02T15:04:05Z"),
+				"task_id": task.ID,
+				"state":   string(task.State),
+			}
+			if !task.StartedAt.IsZero() {
+				entry["started_at"] = formatTaskTimestamp(task.StartedAt)
 			}
 			if !task.FinishedAt.IsZero() {
-				entry["finished_at"] = task.FinishedAt.Format("2006-01-02T15:04:05Z")
+				entry["finished_at"] = formatTaskTimestamp(task.FinishedAt)
 			}
 			out = append(out, entry)
 		}
@@ -61,12 +71,14 @@ func HandleTaskStatus(state *BrokerState) Handler {
 		result := map[string]any{
 			"task_id":            task.ID,
 			"state":              string(task.State),
-			"started_at":         task.StartedAt.Format("2006-01-02T15:04:05Z"),
 			"event_count":        task.EventCount,
 			"fell_back_to_fresh": task.FellBackToFresh,
 		}
+		if !task.StartedAt.IsZero() {
+			result["started_at"] = formatTaskTimestamp(task.StartedAt)
+		}
 		if !task.FinishedAt.IsZero() {
-			result["finished_at"] = task.FinishedAt.Format("2006-01-02T15:04:05Z")
+			result["finished_at"] = formatTaskTimestamp(task.FinishedAt)
 			result["exit_code"] = task.ExitCode
 		}
 		if task.CodexSession != "" {

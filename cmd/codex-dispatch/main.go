@@ -157,7 +157,7 @@ func runDispatchSync(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1
 	}
-	env.WorkDir = wd
+	env.WorkDir = dispatch.ResolveWorkDir(wd, os.Getenv)
 	rc, _ := dispatch.Run(env, stdout, stderr)
 	return rc
 }
@@ -215,7 +215,7 @@ func runDispatchDetach(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1
 	}
-	env.WorkDir = wd
+	env.WorkDir = dispatch.ResolveWorkDir(wd, os.Getenv)
 
 	if err := dispatch.Validate(env); err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)

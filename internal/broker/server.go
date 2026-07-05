@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -54,11 +55,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("listen: %w", err)
 	}
 	if s.addrFile != "" {
-		if err := os.WriteFile(s.addrFile, []byte(listener.Addr().String()+"\n"), 0o600); err != nil {
+		addr := listener.Addr().String()
+		if err := writeAddrFileAtomic(s.addrFile, addr); err != nil {
 			listener.Close()
 			return fmt.Errorf("write broker addr: %w", err)
 		}
-		defer os.Remove(s.addrFile)
+		defer removeAddrFileIfCurrent(s.addrFile, addr)
 	}
 	defer listener.Close()
 
@@ -81,6 +83,35 @@ func (s *Server) Serve(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func writeAddrFileAtomic(path, addr string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write([]byte(addr + "\n")); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func removeAddrFileIfCurrent(path, addr string) {
+	b, err := os.ReadFile(path)
+	if err == nil && string(b) == addr+"\n" {
+		_ = os.Remove(path)
+	}
 }
 
 // ServeHTTP handles one JSON-RPC request per HTTP request. The response body is
@@ -108,6 +139,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	// Per-connection write mutex. Streaming handlers push task.event
 	// notifications through this same mutex so concurrent
 	// notification + response writes never interleave.
@@ -119,6 +159,9 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		}
 		line, err := ReadLine(reader)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			if errors.Is(err, io.EOF) {
 				return
 			}
@@ -235,14 +278,18 @@ type connNotifier struct {
 }
 
 func (n *connNotifier) Notify(method string, params any) error {
-	b, err := MarshalNotification(method, params)
+	frames, err := MarshalNotificationFrames(method, params)
 	if err != nil {
 		return err
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	_, err = n.conn.Write(b)
-	return err
+	for _, b := range frames {
+		if _, err := n.conn.Write(b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (n *connNotifier) Write(b []byte) (int, error) {
@@ -256,18 +303,25 @@ type httpNotifier struct {
 }
 
 func (n *httpNotifier) Notify(method string, params any) error {
-	b, err := MarshalNotification(method, params)
+	frames, err := MarshalNotificationFrames(method, params)
 	if err != nil {
 		return err
 	}
-	_, err = n.Write(b)
-	return err
+	for _, b := range frames {
+		if _, err := n.Write(b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (n *httpNotifier) Write(b []byte) (int, error) {
 	written, err := n.w.Write(b)
+	if err != nil {
+		return written, err
+	}
 	if f, ok := n.w.(http.Flusher); ok {
 		f.Flush()
 	}
-	return written, err
+	return written, nil
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,13 @@ func (lw *LogWriter) WriteMarker() error {
 	return err
 }
 
+// Sync flushes stdout.log to stable storage.
+func (lw *LogWriter) Sync() error {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.file.Sync()
+}
+
 // Close shuts the underlying file.
 func (lw *LogWriter) Close() error {
 	lw.mu.Lock()
@@ -94,6 +102,13 @@ type DispatchRunResult struct {
 	FellBackToFresh bool   `json:"fell_back_to_fresh"`
 	EventCount      int    `json:"event_count"`
 	ErrorMessage    string `json:"error_message,omitempty"`
+}
+
+type taskEventParams struct {
+	TaskID  string          `json:"task_id"`
+	Seq     int64           `json:"seq"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 // HandleDispatchRun returns a streaming Handler for dispatch.run. The handler
@@ -157,13 +172,13 @@ func HandleDispatchRun(state *BrokerState) Handler {
 func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p DispatchRunParams, logW *LogWriter, notifier Notifier) DispatchRunResult {
 	emit := func(eventType string, payload any) {
 		rawPayload, _ := json.Marshal(payload)
-		seq, _ := state.Table.AppendEvent(taskID, eventType, rawPayload)
+		seq, _ := state.Table.appendEventOwned(taskID, eventType, rawPayload)
 		if notifier != nil {
-			_ = notifier.Notify("task.event", map[string]any{
-				"task_id": taskID,
-				"seq":     seq,
-				"type":    eventType,
-				"payload": json.RawMessage(rawPayload),
+			_ = notifier.Notify("task.event", taskEventParams{
+				TaskID:  taskID,
+				Seq:     seq,
+				Type:    eventType,
+				Payload: json.RawMessage(rawPayload),
 			})
 		}
 	}
@@ -172,6 +187,14 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 	srv, err := state.EnsureAppServer(ctx)
 	if err != nil {
 		return dispatchFailure(state, logW, taskID, fmt.Sprintf("ensure codex app-server: %v", err), emit)
+	}
+
+	// Sandbox preflight: on a host whose bubblewrap Linux sandbox can't start,
+	// a sandboxed mode (read-only/workspace-write) would let codex run the turn
+	// but every shell command fails with a cryptic `bwrap: ...` line buried in
+	// per-command output. Fail fast with an actionable message instead.
+	if msg := preflightSandbox(ctx, srv, p.Sandbox); msg != "" {
+		return dispatchFailure(state, logW, taskID, msg, emit)
 	}
 
 	threadCWD := p.CWD
@@ -219,13 +242,13 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 		Method: "thread/started",
 		Params: threadParams,
 	})
-	tsSeq, _ := state.Table.AppendEvent(taskID, "thread/started", threadParams)
+	tsSeq, _ := state.Table.appendEventOwned(taskID, "thread/started", threadParams)
 	if notifier != nil {
-		_ = notifier.Notify("task.event", map[string]any{
-			"task_id": taskID,
-			"seq":     tsSeq,
-			"type":    "thread/started",
-			"payload": json.RawMessage(threadParams),
+		_ = notifier.Notify("task.event", taskEventParams{
+			TaskID:  taskID,
+			Seq:     tsSeq,
+			Type:    "thread/started",
+			Payload: json.RawMessage(threadParams),
 		})
 	}
 
@@ -354,6 +377,7 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 		"session_id": thread.ID,
 		"error":      errMsg,
 	})
+	_ = logW.Sync()
 	return DispatchRunResult{
 		TaskID:          taskID,
 		State:           string(StateDone),
@@ -388,13 +412,13 @@ const (
 func drainTurn(ctx context.Context, state *BrokerState, taskID string, handle *appserver.TurnHandle, logW *LogWriter, notifier Notifier) (*appserver.Turn, drainOutcome) {
 	relay := func(n appserver.Notification) {
 		_ = logW.WriteNotification(n)
-		seq, _ := state.Table.AppendEvent(taskID, n.Method, []byte(n.Params))
+		seq, _ := state.Table.appendEventOwned(taskID, n.Method, n.Params)
 		if notifier != nil {
-			_ = notifier.Notify("task.event", map[string]any{
-				"task_id": taskID,
-				"seq":     seq,
-				"type":    n.Method,
-				"payload": json.RawMessage(n.Params),
+			_ = notifier.Notify("task.event", taskEventParams{
+				TaskID:  taskID,
+				Seq:     seq,
+				Type:    n.Method,
+				Payload: n.Params,
 			})
 		}
 	}
@@ -460,11 +484,8 @@ const interruptTurnTimeout = 3 * time.Second
 // The launched goroutine is bounded by interruptTurnTimeout via a
 // context.WithTimeout deadline: it always returns within that window even when
 // codex never answers, so a stream of cancelled/timed-out turns cannot
-// accumulate goroutines that hang for the broker's entire lifetime. (The actual
-// turn/interrupt RPC inside Cancel still uses its own context, so a wedged codex
-// may keep that call parked; bounding it fully belongs in the appserver layer.
-// What this guarantees is that the broker-owned goroutine observes a deadline
-// and exits.)
+// accumulate goroutines that hang for the broker's entire lifetime. Cancel's
+// turn/interrupt RPC is also bounded in the appserver layer.
 func interruptTurn(handle *appserver.TurnHandle) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), interruptTurnTimeout)
@@ -517,6 +538,86 @@ func dispatchFailure(state *BrokerState, logW *LogWriter, taskID, msg string, em
 		EventCount:   countEvents(state.Table, taskID),
 		ErrorMessage: msg,
 	}
+}
+
+// preflightSandbox returns a non-empty, actionable failure message when the
+// requested sandbox MODE cannot initialize its bubblewrap-based Linux sandbox on
+// this host, so a dispatch fails fast instead of letting codex bury the cryptic
+// `bwrap: ...` diagnostic in a command's output while the turn limps on with
+// every shell command failing.
+//
+// It is a no-op (returns "") for the danger-full-access and empty modes, which
+// never invoke bubblewrap. For a sandboxed mode it runs codex's command/exec
+// probe fresh on each dispatch: the verdict is deliberately NOT cached so that
+// the moment an operator follows the message's own advice — lifting the host's
+// userns restriction — the very next dispatch succeeds without needing to
+// restart the long-lived per-cwd broker (and a host hardened mid-broker-life is
+// likewise caught rather than slipping past a stale "healthy" verdict). The
+// probe is a threadless `true` exec that only runs for the uncommon sandboxed
+// modes (the danger-full-access default skips it), so the cost is negligible.
+//
+// The probe FAILS OPEN: any error performing it (an older codex without
+// command/exec, a transport failure) returns "" so the guard can only ever turn
+// an already-doomed run into a clearer error — never block a run that would
+// otherwise have worked.
+func preflightSandbox(ctx context.Context, srv *appserver.AppServer, mode string) string {
+	if mode == "" || mode == "danger-full-access" {
+		return ""
+	}
+	res, err := srv.ProbeSandbox(ctx, mode)
+	if err != nil {
+		return "" // fail open; never introduce a new failure mode
+	}
+	if broken, detail := sandboxProbeBroken(res); broken {
+		return sandboxBrokenMessage(mode, detail)
+	}
+	return ""
+}
+
+// sandboxProbeBroken interprets a ProbeSandbox result. bubblewrap prints a
+// "bwrap: <reason>" line to stderr and the probe command never runs (nonzero
+// exit) when it cannot set up the sandbox — most commonly because the host
+// restricts the unprivileged user namespaces bwrap needs. A working sandbox runs
+// `true` → exit 0, empty stderr. A nonzero exit WITHOUT a bwrap signature (e.g.
+// the probe binary was not found on PATH inside a working sandbox) is treated as
+// healthy so the guard stays conservative and only fires on a genuine bwrap
+// failure.
+func sandboxProbeBroken(res appserver.CommandExecResult) (bool, string) {
+	if res.ExitCode == 0 {
+		return false, ""
+	}
+	lower := strings.ToLower(res.Stderr)
+	if strings.Contains(lower, "bwrap") ||
+		strings.Contains(lower, "user namespace") ||
+		strings.Contains(lower, "uid map") {
+		return true, sandboxFirstLine(res.Stderr)
+	}
+	return false, ""
+}
+
+// sandboxBrokenMessage builds the operator-facing fail-fast message, folding in
+// codex's own bwrap diagnostic when available.
+func sandboxBrokenMessage(mode, detail string) string {
+	msg := fmt.Sprintf("codex sandbox %q cannot initialize on this host", mode)
+	if detail != "" {
+		msg += ": " + detail
+	}
+	msg += ". The Linux sandbox uses bubblewrap (bwrap), which needs unprivileged " +
+		"user namespaces this host restricts. Set CODEX_SANDBOX=danger-full-access " +
+		"(the dispatch default) to run without the sandbox, or lift the restriction " +
+		"(e.g. sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)."
+	return msg
+}
+
+// sandboxFirstLine returns the first non-empty, trimmed line of s so a compact
+// error message can quote codex's multi-line bwrap stderr.
+func sandboxFirstLine(s string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" {
+			return ln
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func countEvents(table *Table, taskID string) int {

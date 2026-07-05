@@ -56,3 +56,30 @@ func TestSessionInvalidParams(t *testing.T) {
 		t.Fatalf("err = %v, want session_id-required", err)
 	}
 }
+
+func TestSessionDeregisterCancelsQueuedTaskContext(t *testing.T) {
+	table := NewTable(1, 2048)
+	running, _ := table.Start("sess-a", TaskParams{Mode: "fresh"})
+	_ = table.MarkRunning(running)
+	queued, ok := table.Start("sess-a", TaskParams{Mode: "fresh"})
+	if !ok {
+		t.Fatalf("queued task should be queued")
+	}
+
+	state := &BrokerState{Table: table}
+	taskCtx, cleanup := state.registerTaskContext(context.Background(), queued)
+	defer cleanup()
+
+	h := HandleSessionDeregister(state)
+	out, err := h(context.Background(), []byte(`{"session_id":"sess-a","cancel_queued":true}`))
+	if err != nil {
+		t.Fatalf("deregister: %v", err)
+	}
+	ids := out.(map[string]any)["cancelled_task_ids"].([]string)
+	if len(ids) != 1 || ids[0] != queued {
+		t.Fatalf("cancelled = %v, want [%s]", ids, queued)
+	}
+	if taskCtx.Err() == nil {
+		t.Fatalf("queued task context was not cancelled")
+	}
+}

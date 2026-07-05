@@ -16,6 +16,12 @@ jobs:
           cache: true
       - name: go vet
         run: go vet ./...
+      - name: cross-compile (native Windows/macOS have no runnable tests here)
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=windows GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=amd64 go build ./...
       - name: gofmt
         run: |
           out=$(gofmt -l .)
@@ -26,10 +32,12 @@ jobs:
           fi
       - name: go test (race detector)
         run: go test -race ./...
+      - name: go test (race stressors — concurrency-heavy packages)
+        run: go test -race -count=20 ./internal/broker/ ./internal/codex/appserver/
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: "~> v2"
+          version: v2.8.0
 
   shell:
     runs-on: ubuntu-latest
@@ -74,6 +82,7 @@ jobs:
           CODEX_DISPATCH_BIN: ${{ steps.bin.outputs.path }}
         run: |
           bats tests/bats/dispatch-codex.bats
+          bats tests/bats/dispatch-gowork-cwd.bats
           bats tests/bats/pick-iterations.bats
           bats tests/bats/launcher.bats
           bats tests/bats/dispatch-detach.bats

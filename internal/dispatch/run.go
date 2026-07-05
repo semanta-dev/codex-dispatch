@@ -73,6 +73,16 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		return 1, err
 	}
 
+	// Monorepo auto-scoping: when the caller did not pin a working directory
+	// (WorkDir is still the repo root), derive the go.work/module subdir that
+	// owns the seeded files and run codex there. Files spanning multiple modules
+	// (or none) leave WorkDir at the repo root.
+	if SameDir(env.WorkDir, repoRoot) {
+		if mod := DeriveModuleDir(repoRoot, env.Files); mod != "" {
+			env.WorkDir = mod
+		}
+	}
+
 	resultDir, err := ensureResultDir(env, repoRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
@@ -127,7 +137,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		fellBackToFresh bool
 	)
 	if env.SessionID != "" {
-		run, err = codex.Resume(ctx, env.SessionID, promptText, env.Sandbox, env.Model, logPath)
+		run, err = codex.Resume(ctx, env.SessionID, promptText, env.Sandbox, env.Model, logPath, env.WorkDir)
 		if err != nil {
 			if rc, cerr, handled := handleCanceled(ctx, err, resultDir, logPath, stderr); handled {
 				return rc, cerr
@@ -141,7 +151,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 			fellBackToFresh = true
 		}
 	} else {
-		run, err = codex.Fresh(ctx, promptText, env.Sandbox, env.Model, logPath)
+		run, err = codex.Fresh(ctx, promptText, env.Sandbox, env.Model, logPath, env.WorkDir)
 		if err != nil {
 			if rc, cerr, handled := handleCanceled(ctx, err, resultDir, logPath, stderr); handled {
 				return rc, cerr

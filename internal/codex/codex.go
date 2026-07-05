@@ -51,17 +51,19 @@ func hasFallbackMarker(b []byte) bool {
 // Fresh dispatches a fresh codex turn for the given prompt + sandbox, writing
 // codex events to logPath. Blocks until codex completes. Public API matches
 // Phase 1 for callers in internal/dispatch.
-func Fresh(ctx context.Context, prompt, sandbox, model, logPath string) (Run, error) {
-	return dispatchViaBroker(ctx, "fresh", "", prompt, sandbox, model, logPath)
+func Fresh(ctx context.Context, prompt, sandbox, model, logPath, workDir string) (Run, error) {
+	return dispatchViaBroker(ctx, "fresh", "", prompt, sandbox, model, logPath, workDir)
 }
 
 // Resume dispatches a resume codex turn against sessionID. sandbox is accepted
-// for API symmetry; the broker decides whether to pass it through.
-func Resume(ctx context.Context, sessionID, prompt, sandbox, model, logPath string) (Run, error) {
-	return dispatchViaBroker(ctx, "resume", sessionID, prompt, sandbox, model, logPath)
+// for API symmetry; the broker decides whether to pass it through. workDir, when
+// inside the repo root, pins codex's thread cwd to that module subdir (go.work
+// monorepos); empty runs at the repo root.
+func Resume(ctx context.Context, sessionID, prompt, sandbox, model, logPath, workDir string) (Run, error) {
+	return dispatchViaBroker(ctx, "resume", sessionID, prompt, sandbox, model, logPath, workDir)
 }
 
-func dispatchViaBroker(ctx context.Context, mode, prevSessionID, prompt, sandbox, model, logPath string) (Run, error) {
+func dispatchViaBroker(ctx context.Context, mode, prevSessionID, prompt, sandbox, model, logPath, workDir string) (Run, error) {
 	if ctx.Err() != nil {
 		return Run{ExitCode: -1}, ctx.Err()
 	}
@@ -91,7 +93,7 @@ func dispatchViaBroker(ctx context.Context, mode, prevSessionID, prompt, sandbox
 		PrevSessionID: prevSessionID,
 		ResultDir:     resultDir,
 		LogPath:       logPath,
-		CWD:           repoRoot,
+		CWD:           threadCWD(repoRoot, workDir),
 		Model:         model,
 	}, nil)
 	if err != nil {
@@ -103,6 +105,35 @@ func dispatchViaBroker(ctx context.Context, mode, prevSessionID, prompt, sandbox
 		FellBackToFresh: res.FellBackToFresh,
 		ErrorMessage:    res.ErrorMessage,
 	}, nil
+}
+
+// threadCWD chooses the directory codex should use as its thread cwd. It is
+// workDir when workDir is a non-empty path inside repoRoot, otherwise repoRoot.
+//
+// This is what lets a dispatch invoked from a module subdirectory of a go.work
+// monorepo (one git repo at the parent, modules like ./shared ./server beneath
+// it) run codex in that module rather than collapsing every dispatch to the
+// repo root. The broker address/spawn stay keyed on repoRoot (one broker per
+// repo); only the per-thread cwd varies. workDir outside repoRoot (or an
+// unresolvable path) falls back to repoRoot so a stray cwd can never escape the
+// repository.
+func threadCWD(repoRoot, workDir string) string {
+	if workDir == "" {
+		return repoRoot
+	}
+	absRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return repoRoot
+	}
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		return repoRoot
+	}
+	rel, err := filepath.Rel(absRoot, absWork)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return repoRoot
+	}
+	return absWork
 }
 
 // RepoRoot walks up from start (or the current working directory when start is
@@ -197,6 +228,10 @@ func EnsureBrokerRunning(addrPath, repoRoot string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	// Detach the broker from the launching dispatch process (Setsid on unix;
+	// DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows) so it survives the
+	// launcher exiting and isn't killed by a signal to the launcher's group.
+	setBrokerProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("spawn broker: %w", err)
 	}

@@ -60,6 +60,7 @@ The parent passes the following labeled fields. Required fields are marked.
 | `ACCEPTANCE CRITERIA` | yes | One verifiable claim per line (or semicolon-separated). |
 | `CONSTRAINTS` | no | Out-of-scope / don't-touch list. |
 | `FILES` | no | Comma-separated paths to seed the codex prompt. |
+| `WORKDIR` | no | Module subdirectory to run codex in (see **Working directory** below). |
 | `TEST POLICY` | no | `run` (default) or `skip`. |
 | `TEST CMD` | no | Override for the auto-detected **unit** test command. |
 | `VERIFY CMD` | no | An **integration/e2e** command exercising the runtime behavior the criteria describe (distinct from unit tests). Passed to the reviewer; gates behavioral acceptance. |
@@ -79,6 +80,14 @@ If `TASK` or `ACCEPTANCE CRITERIA` is missing or empty, skip the loop entirely a
 ```
 
 The autonomous defaults are stricter than `/codex` on purpose — `/codex` can derive criteria from the task because the user is in the loop; you have no human in the loop, so guessing is forbidden.
+
+## Working directory (monorepos)
+
+In a multi-module repo — a `go.work` parent with module subdirs like `./shared ./server`, or any repo whose subprojects carry their own manifest — codex must run **in the module the task targets**, not the repo root, or it operates from the wrong directory (the common monorepo dispatch failure).
+
+**The dispatch auto-scopes for you:** when invoked at the repo root with no `WORKDIR`, it runs codex in the module that owns the seeded `FILES` (the nearest ancestor of all `FILES` carrying a module manifest: `go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json`, `build.gradle`, `pom.xml`). So the reliable way to scope a dispatch is simply to **seed `FILES` with the target module's files** — always do this for a module-scoped task.
+
+`WORKDIR` is an override for when `FILES` can't express the intent (e.g. files legitimately span modules but you want codex in one): set it to that module. Leave `WORKDIR` empty and let `FILES` span modules for a genuine whole-repo task. A `WORKDIR` outside the repo root is ignored (the dispatch falls back to the root), so it is always safe to pass.
 
 ## Pick max iterations
 
@@ -108,13 +117,14 @@ For `i` from 1 to `MAX_ITER`:
 CODEX_TASK="$TASK" \
 CODEX_ACCEPTANCE="$ACCEPTANCE" \
 CODEX_FILES="$FILES" \
+CODEX_WORKDIR="$WORKDIR" \
 CODEX_CONSTRAINTS="$CONSTRAINTS" \
 CODEX_FEEDBACK="$feedback" \
 CODEX_SESSION_ID="$prev_session" \
   "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch-codex.sh"
 ```
 
-The last line of stdout is `RUN_DIR`. Read `RUN_DIR/result.json` for `exit_code`, `session_id`, `files_changed`, `lines_added`, `lines_removed`, `fell_back_to_fresh`.
+The last line of stdout is `RUN_DIR`. Read `RUN_DIR/result.json` for `exit_code`, `session_id`, `files_changed`, `lines_added`, `lines_removed`, `fell_back_to_fresh`. `CODEX_WORKDIR` empty is fine — codex then runs in the invocation directory.
 
 ### Short-circuits
 

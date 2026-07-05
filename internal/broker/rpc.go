@@ -6,15 +6,20 @@ package broker
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // MaxMessageSize caps a single JSON-RPC line at 4 MiB (matches the codex
 // event-stream scanner buffer from Phase 1).
 const MaxMessageSize = 4 * 1024 * 1024
+
+const (
+	taskEventChunkMethod          = "task.event.chunk"
+	maxTaskEventChunkPayloadBytes = 2 * 1024 * 1024
+)
 
 // ProtocolVersion is baked into every successful response so clients can
 // refuse a mismatched major version at the wire boundary.
@@ -122,29 +127,128 @@ func MarshalNotification(method string, params any) ([]byte, error) {
 	return b, nil
 }
 
-// ReadLine reads one newline-delimited JSON message from r, rejecting any
-// line that exceeds MaxMessageSize.
-func ReadLine(r *bufio.Reader) ([]byte, error) {
-	var buf bytes.Buffer
-	for {
-		chunk, err := r.ReadSlice('\n')
-		buf.Write(chunk)
-		if buf.Len() > MaxMessageSize {
-			return nil, fmt.Errorf("%w: line exceeded %d bytes", ErrMessageTooLarge, MaxMessageSize)
+type taskEventChunkParams struct {
+	TaskID      string `json:"task_id"`
+	Seq         int64  `json:"seq"`
+	Type        string `json:"type"`
+	ChunkID     string `json:"chunk_id"`
+	ChunkIndex  int    `json:"chunk_index"`
+	TotalChunks int    `json:"total_chunks"`
+	Payload     []byte `json:"payload_b64"`
+}
+
+// MarshalNotificationFrames encodes a server-pushed notification into one or
+// more wire frames. Normal notifications keep the same single-frame shape as
+// MarshalNotification. Oversized task.event payloads are split into ordered
+// task.event.chunk notifications so MaxMessageSize remains a per-frame bound.
+func MarshalNotificationFrames(method string, params any) ([][]byte, error) {
+	b, err := MarshalNotification(method, params)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) <= MaxMessageSize {
+		return [][]byte{b}, nil
+	}
+	if method != "task.event" {
+		return nil, fmt.Errorf("%w: notification exceeded %d bytes", ErrMessageTooLarge, MaxMessageSize)
+	}
+	return marshalTaskEventChunks(params)
+}
+
+func marshalTaskEventChunks(params any) ([][]byte, error) {
+	rawParams, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	var ev taskEventParams
+	if err := json.Unmarshal(rawParams, &ev); err != nil {
+		return nil, fmt.Errorf("chunk task.event params: %w", err)
+	}
+	if len(ev.Payload) == 0 {
+		return nil, fmt.Errorf("%w: oversized task.event has empty payload", ErrMessageTooLarge)
+	}
+
+	chunkSize := maxTaskEventChunkPayloadBytes
+	total := (len(ev.Payload) + chunkSize - 1) / chunkSize
+	chunkID := fmt.Sprintf("%s:%d", ev.TaskID, ev.Seq)
+	frames := make([][]byte, 0, total)
+	for i, start := 0, 0; start < len(ev.Payload); i, start = i+1, start+chunkSize {
+		end := start + chunkSize
+		if end > len(ev.Payload) {
+			end = len(ev.Payload)
 		}
-		if err == bufio.ErrBufferFull {
-			continue
+		chunk := taskEventChunkParams{
+			TaskID:      ev.TaskID,
+			Seq:         ev.Seq,
+			Type:        ev.Type,
+			ChunkID:     chunkID,
+			ChunkIndex:  i,
+			TotalChunks: total,
+			Payload:     []byte(ev.Payload[start:end]),
 		}
+		b, err := MarshalNotification(taskEventChunkMethod, chunk)
 		if err != nil {
 			return nil, err
 		}
+		for len(b) > MaxMessageSize {
+			if chunkSize <= 1 {
+				return nil, fmt.Errorf("%w: task.event chunk exceeded %d bytes", ErrMessageTooLarge, MaxMessageSize)
+			}
+			chunkSize /= 2
+			total = (len(ev.Payload) + chunkSize - 1) / chunkSize
+			frames = frames[:0]
+			i = -1
+			start = -chunkSize
+			break
+		}
+		if len(b) <= MaxMessageSize {
+			frames = append(frames, b)
+		}
+	}
+	return frames, nil
+}
+
+// ReadLine reads one newline-delimited JSON message from r, rejecting any
+// line that exceeds MaxMessageSize.
+func ReadLine(r *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(buf)+len(chunk) > MaxMessageSize {
+			return nil, fmt.Errorf("%w: line exceeded %d bytes", ErrMessageTooLarge, MaxMessageSize)
+		}
+		if err == bufio.ErrBufferFull {
+			buf = append(buf, chunk...)
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if len(buf) > 0 {
+					buf = append(buf, chunk...)
+					return buf, nil
+				}
+				if len(chunk) > 0 {
+					return append([]byte(nil), chunk...), nil
+				}
+			}
+			return nil, err
+		}
+		if len(buf) > 0 {
+			buf = append(buf, chunk...)
+			out := buf
+			out = out[:len(out)-1] // drop '\n'
+			if len(out) > 0 && out[len(out)-1] == '\r' {
+				out = out[:len(out)-1]
+			}
+			return out, nil
+		}
 		// Strip trailing newline + an optional preceding CR so CRLF-terminated
 		// lines from non-Unix clients parse cleanly.
-		out := buf.Bytes()
+		out := chunk
 		out = out[:len(out)-1] // drop '\n'
 		if len(out) > 0 && out[len(out)-1] == '\r' {
 			out = out[:len(out)-1]
 		}
-		return out, nil
+		return append([]byte(nil), out...), nil
 	}
 }

@@ -181,7 +181,9 @@ fi
 cleanup() {
   if [ "${GRAPHRAG_WORKTREE_KEEP:-0}" != "1" ]; then
     for wt in "${worktrees[@]:-}"; do
-      [ -d "$wt" ] && git -C "$parent" worktree remove --force "$wt" >/dev/null 2>&1 || true
+      if [ -d "$wt" ]; then
+        git -C "$parent" worktree remove --force "$wt" >/dev/null 2>&1 || true
+      fi
     done
   fi
 }

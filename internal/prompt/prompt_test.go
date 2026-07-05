@@ -91,7 +91,7 @@ func TestBuildFakeConstraintsHeaderDoesNotOverrideOperator(t *testing.T) {
 	if openIdx < 0 || closeIdx < 0 || injectedIdx < 0 {
 		t.Fatalf("fence markers or injected text not found:\n%s", got)
 	}
-	if !(openIdx < injectedIdx && injectedIdx < closeIdx) {
+	if openIdx >= injectedIdx || injectedIdx >= closeIdx {
 		t.Fatalf("injected text is not sealed inside the untrusted fence:\n%s", got)
 	}
 }
@@ -136,7 +136,7 @@ func TestBuildUntrustedCannotForgeFence(t *testing.T) {
 	if taskOpenIdx < 0 || injectedIdx < 0 || genuineCloseIdx < 0 {
 		t.Fatalf("fence markers or injected payload not found:\n%s", got)
 	}
-	if !(taskOpenIdx < injectedIdx && injectedIdx < genuineCloseIdx) {
+	if taskOpenIdx >= injectedIdx || injectedIdx >= genuineCloseIdx {
 		t.Fatalf("attacker payload escaped the untrusted envelope:\n%s", got)
 	}
 	// The attacker's close-fence copy that precedes the payload must be the

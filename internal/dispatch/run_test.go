@@ -609,3 +609,82 @@ func TestRunBaselineCaptureFailureIsSurfaced(t *testing.T) {
 		t.Fatalf("result.json was written despite baseline failure; attribution would be unreliable")
 	}
 }
+
+// TestRunThreadsSubdirCwdToCodex verifies an explicit WorkDir set to a module
+// subdir is threaded all the way into codex's thread cwd (not collapsed to the
+// repo root, which was the pre-scoping behavior).
+func TestRunThreadsSubdirCwdToCodex(t *testing.T) {
+	repo := setupGitRepo(t)
+	sub := filepath.Join(repo, "server")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	rec := filepath.Join(t.TempDir(), "cwd.txt")
+	installFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":        "0.130.0",
+		"FAKE_APPSERVER_SESSION":    "s-cwd",
+		"FAKE_APPSERVER_RECORD_CWD": rec,
+		"FAKE_APPSERVER_EDIT":       filepath.Join(sub, "out.txt") + ":done",
+	})
+	startInProcessBroker(t, repo)
+	chdirTo(t, repo)
+	env := Env{
+		WorkDir:    sub,
+		Task:       "t",
+		Acceptance: "a",
+		Sandbox:    "workspace-write",
+		ResultDir:  filepath.Join(repo, "run-cwd"),
+	}
+	if _, err := Run(env, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, err := os.ReadFile(rec)
+	if err != nil {
+		t.Fatalf("read recorded cwd: %v", err)
+	}
+	if string(got) != sub {
+		t.Fatalf("codex received cwd %q, want module subdir %q (cwd collapsed to repo root is the bug)", got, sub)
+	}
+}
+
+// TestRunAutoScopesToModuleFromFiles verifies that, invoked at the repo root
+// with no CODEX_WORKDIR, the run auto-derives the module owning CODEX_FILES and
+// runs codex there.
+func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
+	repo := setupGitRepo(t)
+	sub := filepath.Join(repo, "server")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir module: %v", err)
+	}
+	// The module manifest is what makes server/ a module for derivation.
+	if err := os.WriteFile(filepath.Join(sub, "go.mod"), []byte("module x/server\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	rec := filepath.Join(t.TempDir(), "cwd.txt")
+	installFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":        "0.130.0",
+		"FAKE_APPSERVER_SESSION":    "s-autoscope",
+		"FAKE_APPSERVER_RECORD_CWD": rec,
+		"FAKE_APPSERVER_EDIT":       filepath.Join(sub, "server_hello.go") + ":done",
+	})
+	startInProcessBroker(t, repo)
+	chdirTo(t, repo)
+	env := Env{
+		WorkDir:    repo, // invoked at the repo ROOT, no CODEX_WORKDIR
+		Task:       "t",
+		Acceptance: "a",
+		Sandbox:    "workspace-write",
+		Files:      "server/server_hello.go", // the only scoping signal
+		ResultDir:  filepath.Join(repo, "run-autoscope"),
+	}
+	if _, err := Run(env, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, err := os.ReadFile(rec)
+	if err != nil {
+		t.Fatalf("read recorded cwd: %v", err)
+	}
+	if string(got) != sub {
+		t.Fatalf("codex cwd = %q, want auto-derived module %q (scoping from CODEX_FILES failed)", got, sub)
+	}
+}

@@ -39,7 +39,7 @@ diff_path="$run_dir/diff.patch"
 repo="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf 'clean-verify: not inside a git repository\n' >&2; exit 6; }
 
 wt="$(mktemp -d "${TMPDIR:-/tmp}/codex-clean-verify.XXXXXX")"
-# shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT' below
+# shellcheck disable=SC2329,SC2317  # invoked indirectly via 'trap cleanup EXIT' below
 cleanup() {
   if [ -n "${CLEAN_VERIFY_KEEP:-}" ]; then
     printf 'clean-verify: keeping worktree %s (CLEAN_VERIFY_KEEP set)\n' "$wt" >&2

@@ -1,6 +1,6 @@
 ---
 description: Delegate a coding task to the Codex CLI and review the result with an iteration loop.
-argument-hint: '[--max-iter N] [--acceptance "..."] [--files a,b,c] [--constraints "..."] [--no-tests] [--test-cmd "..."] [--verify-cmd "..."] [--clean-verify] [--no-resume] <task>'
+argument-hint: '[--max-iter N] [--acceptance "..."] [--files a,b,c] [--workdir dir] [--constraints "..."] [--no-tests] [--test-cmd "..."] [--verify-cmd "..."] [--clean-verify] [--no-resume] <task>'
 allowed-tools: [Task]
 ---
 

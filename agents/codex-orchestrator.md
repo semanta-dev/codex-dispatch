@@ -28,6 +28,7 @@ Walk the input left-to-right. Extract these flags; everything else is the task.
 | `--max-iter N` | int | Iteration cap. |
 | `--acceptance "..."` | quoted | Acceptance criteria (one per semicolon). |
 | `--files a,b,c` | csv | Files to seed codex's prompt. |
+| `--workdir dir` | path | Module subdirectory to run codex in (monorepos — see step 2). |
 | `--constraints "..."` | quoted | Extra don't-touch list. |
 | `--no-tests` | bool | Skip the test step in review. |
 | `--test-cmd "..."` | quoted | Override the auto-detected **unit** test command. |
@@ -46,6 +47,7 @@ If the task is empty after parsing, return:
 - **TASK** — the unparsed remainder
 - **ACCEPTANCE** — `--acceptance` value, or enumerate 2-4 verifiable criteria from the task (one per line)
 - **FILES** — `--files` value or empty
+- **WORKDIR** — module subdirectory to run codex in, or empty. The dispatch **auto-scopes** to the module that owns the seeded FILES (nearest ancestor with a `go.mod`/`package.json`/`pyproject.toml`/`Cargo.toml`/etc.), so for a module-scoped task in a monorepo just pass the right `--files`. Set WORKDIR (from `--workdir`) only to override that. A WORKDIR outside the repo root is ignored (falls back to root), so it is always safe to pass.
 - **CONSTRAINTS** — start with `do not touch unrelated files; do not add new dependencies without justification`; append `--constraints` if provided
 - **TEST_POLICY** — `skip` if `--no-tests`, else `run`
 - **TEST_CMD** — `--test-cmd` value or empty (will be auto-detected during review)
@@ -93,13 +95,14 @@ For `i` from 1 to `MAX_ITER`:
 CODEX_TASK="$TASK" \
 CODEX_ACCEPTANCE="$ACCEPTANCE" \
 CODEX_FILES="$FILES" \
+CODEX_WORKDIR="$WORKDIR" \
 CODEX_CONSTRAINTS="$CONSTRAINTS" \
 CODEX_FEEDBACK="$feedback" \
 CODEX_SESSION_ID="$prev_session" \
   "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch-codex.sh"
 ```
 
-The last stdout line is the run directory absolute path (`RUN_DIR`). Read `$RUN_DIR/result.json` — it has `exit_code`, `session_id`, `files_changed`, `lines_added`, `lines_removed`, `stdout_path`, `diff_path`, `fell_back_to_fresh`, `error_message`.
+The last stdout line is the run directory absolute path (`RUN_DIR`). `CODEX_WORKDIR` empty is fine — codex then runs at the repo root. Read `$RUN_DIR/result.json` — it has `exit_code`, `session_id`, `files_changed`, `lines_added`, `lines_removed`, `stdout_path`, `diff_path`, `fell_back_to_fresh`, `error_message`.
 
 ### 5b. Short-circuit codex errors
 

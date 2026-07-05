@@ -435,3 +435,20 @@ _codex_wait_terminal() {
   # Stdout log preserves the fallback marker
   grep -qF "fell back to fresh dispatch" "$TEST_REPO/run-stale/stdout.log"
 }
+
+@test "sandboxed mode on a host without usable bubblewrap fails fast with guidance" {
+  local rpc_log="$FAKE_BIN/rpc-bwrap.log"
+  export CODEX_RESULT_DIR="$TEST_REPO/run-bwrap"
+  export FAKE_APPSERVER_RPC_LOG="$rpc_log"
+  export FAKE_APPSERVER_SESSION="sess-bwrap"
+  export CODEX_SANDBOX="workspace-write"
+  export FAKE_APPSERVER_BWRAP_BROKEN=1
+  run "$DISPATCH"
+  [ "$status" -eq 0 ]
+  # The dispatch fails fast at the sandbox preflight: exit 64, actionable message.
+  [ "$(jq -r '.exit_code' "$TEST_REPO/run-bwrap/result.json")" -eq 64 ]
+  jq -r '.error_message' "$TEST_REPO/run-bwrap/result.json" | grep -qF "danger-full-access"
+  # The probe ran, but no thread/turn was ever started.
+  grep -qE $'^command/exec\t' "$rpc_log"
+  run ! grep -qE $'^turn/start\t' "$rpc_log"
+}

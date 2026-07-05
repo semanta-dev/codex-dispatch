@@ -167,6 +167,8 @@ State:
 - `last_verification = ""`
 - `max_iter = 3` unless packet is large; cap at 5.
 
+**Working directory (monorepos).** `cd` to the repo root for broker resolution. The dispatch then **auto-scopes** codex to the module that owns the seeded `FILES` (nearest ancestor with a module manifest: `go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json`, `build.gradle`, `pom.xml`), so seed `CODEX_FILES` with the packet's allowed files and codex runs in that module rather than collapsing to the root. `CODEX_WORKDIR` is an explicit override; leave it empty unless the allowed files span modules but you want one. A `WORKDIR` outside the repo root is ignored (falls back to root).
+
 For each iteration:
 
 ```bash
@@ -174,6 +176,7 @@ cd <repo root>
 CODEX_TASK="$TASK" \
 CODEX_ACCEPTANCE="$ACCEPTANCE" \
 CODEX_FILES="$FILES" \
+CODEX_WORKDIR="$WORKDIR" \
 CODEX_CONSTRAINTS="$CONSTRAINTS" \
 CODEX_FEEDBACK="$feedback" \
 CODEX_SESSION_ID="$prev_session" \
@@ -195,6 +198,8 @@ CODEX_FEEDBACK="$feedback" \
 CODEX_SESSION_ID="$prev_session" \
   "${CLAUDE_PLUGIN_ROOT}/scripts/graphrag-worktree-dispatch.sh" --allowed-file /tmp/<allowed-files>
 ```
+
+Module auto-scoping applies to the worktree fallback too: the temporary worktree lives under `<repo>/.codex-dispatch/`, so the dispatch derives the module from the seeded files relative to the worktree and runs codex in `<worktree>/<module>` (the broker stays keyed on the main repo; only the thread cwd is the module). Seed `CODEX_FILES` the same way as the default path.
 
 That helper creates a temporary detached git worktree, runs the dispatch there,
 runs the allowed-file scope audit there, and fans in only changed allowed paths

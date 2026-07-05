@@ -126,3 +126,39 @@ EOF
   [ "$status" -eq 6 ]
   [[ "$output" == *"tar"* ]] || [[ "$output" == *"required"* ]]
 }
+
+@test "windows platform downloads .zip, extracts codex-dispatch.exe, dispatches" {
+  command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 || skip "zip/unzip not available"
+
+  # Shim uname so the launcher detects Windows (Git Bash / MSYS2) on this host.
+  local shim; shim="$(mktemp -d)"
+  cat > "$shim/uname" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) echo "MINGW64_NT-10.0" ;;
+  -m) echo "x86_64" ;;
+  *)  exec /usr/bin/uname "$@" ;;
+esac
+EOF
+  chmod +x "$shim/uname"
+
+  # Build a Windows .zip release fixture holding a codex-dispatch.exe stub. On
+  # Linux the "exe" is a shebang script, which execs fine regardless of suffix.
+  local stage; stage="$(mktemp -d)"
+  cat > "$stage/codex-dispatch.exe" <<'EOF'
+#!/usr/bin/env bash
+echo "win-stub-ok"
+EOF
+  chmod +x "$stage/codex-dispatch.exe"
+  ( cd "$stage" && zip -q "$RELEASE_DIR/codex-dispatch_windows-amd64.zip" codex-dispatch.exe )
+  local sum
+  sum="$(sha256sum "$RELEASE_DIR/codex-dispatch_windows-amd64.zip" | awk '{print $1}')"
+  printf '%s  codex-dispatch_windows-amd64.zip\n' "$sum" > "$RELEASE_DIR/checksums.txt"
+  export CODEX_DISPATCH_RELEASE_URL="file://$RELEASE_DIR"
+
+  PATH="$shim:$PATH" run "$DISPATCH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"win-stub-ok"* ]]
+  [ -x "$CACHE_VER_DIR/codex-dispatch.exe" ]
+  rm -rf "$shim" "$stage"
+}

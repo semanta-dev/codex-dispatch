@@ -6,7 +6,7 @@ builds:
     binary: codex-dispatch
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     flags: [-trimpath]
     ldflags:
@@ -15,6 +15,11 @@ builds:
 archives:
   - formats: [tar.gz]
     name_template: "codex-dispatch_{{.Os}}-{{.Arch}}"
+    # Windows ships as .zip (the platform convention) with a codex-dispatch.exe
+    # inside; the launcher's Windows branch downloads and unzips it.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     files: [] # binary only
 
 checksum:
