@@ -127,9 +127,9 @@ distinct from the binary's `0/2/3/64`.
 
 | Code | Meaning |
 |---|---|
-| `5` | Checksum mismatch (or `checksums.txt` has no entry for the platform tarball). |
-| `6` | Required tool missing (`tar`, `curl`/`wget`, `sha256sum`/`shasum`), unsupported OS/arch, or missing `VERSION` file. |
-| `7` | Network unreachable while downloading the tarball or `checksums.txt`. |
+| `5` | Checksum mismatch (or `checksums.txt` has no entry for the platform archive). |
+| `6` | Required tool missing (`tar` — or `unzip` on Windows —, `curl`/`wget`, `sha256sum`/`shasum`), unsupported OS/arch, or missing `VERSION` file. |
+| `7` | Network unreachable while downloading the archive or `checksums.txt`. |
 | `8` | Tarball corrupt despite a matching checksum (extraction failed or the archive is missing the binary). |
 
 The other helper scripts (`pick-iterations.sh`, `capture-diff.sh`) exit `6`
@@ -216,7 +216,7 @@ with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
 
 The launcher downloads the `codex-dispatch` binary from GitHub Releases on
 first use. If the network is unreachable, install offline: download
-`codex-dispatch_<os>-<arch>.tar.gz` and `checksums.txt` from the
+`codex-dispatch_<os>-<arch>.tar.gz` (`.zip` on Windows) and `checksums.txt` from the
 [release page](https://github.com/semanta-dev/codex-dispatch/releases),
 place them in
 `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/`, then

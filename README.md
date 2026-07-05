@@ -69,7 +69,7 @@ All surfaces share a single shell dispatch core (`scripts/dispatch-codex.sh`) an
 
 ## Prerequisites
 
-- A POSIX shell environment (Linux x86_64/arm64, macOS amd64/arm64).
+- A POSIX shell environment: Linux (x86_64/arm64), macOS (amd64/arm64), or Windows (amd64/arm64) via Git Bash / MSYS2.
 - `git` — the working directory must be a git repository.
 - [`codex`](https://github.com/openai/codex) CLI **version 0.130.0 or later** installed and on `$PATH` (`codex --version` must report `≥ 0.130.0`).
 - `tar`, `curl` (or `wget`), and `sha256sum` (or `shasum`) — used by the launcher to download and verify the `codex-dispatch` binary on first use.
@@ -347,10 +347,10 @@ Two layers return codes from disjoint ranges. Full table in [`docs/configuration
 
 | Code | Meaning |
 |---|---|
-| `5` | Checksum mismatch (or no `checksums.txt` entry for the platform tarball). |
-| `6` | Required tool missing (`tar`, `curl`/`wget`, `sha256sum`/`shasum`), unsupported OS/arch, or missing `VERSION`. |
-| `7` | Network unreachable while downloading the tarball or `checksums.txt`. |
-| `8` | Tarball corrupt despite a matching checksum. |
+| `5` | Checksum mismatch (or no `checksums.txt` entry for the platform archive). |
+| `6` | Required tool missing (`tar` or `unzip` on Windows, `curl`/`wget`, `sha256sum`/`shasum`), unsupported OS/arch, or missing `VERSION`. |
+| `7` | Network unreachable while downloading the archive or `checksums.txt`. |
+| `8` | Archive corrupt despite a matching checksum. |
 
 ## Troubleshooting
 
@@ -360,7 +360,7 @@ Two layers return codes from disjoint ranges. Full table in [`docs/configuration
 | **`codex` not found (exit 3)** | Put `codex` on `$PATH`, or point the broker at it with `CODEX_BROKER_CODEX_BIN`. |
 | **Broker won't start / stale `broker.addr`** | The dispatch path auto-heals a dead endpoint (pings, then respawns). To force a clean restart: `codex-dispatch dispatch --list`, then `rm -f .codex-dispatch/broker.addr .codex-dispatch/broker.pid` and re-dispatch. If you set `CODEX_BROKER_ADDR_PATH`, remove that path instead. |
 | **Codex sandbox-denied / `bwrap: setting up uid map: Permission denied`** | Codex's Linux sandbox uses bubblewrap, which needs unprivileged user namespaces. On hosts that restrict them (e.g. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), `read-only`/`workspace-write` can't start the sandbox. The default `CODEX_SANDBOX=danger-full-access` skips the sandbox and is unaffected. If you request a sandboxed mode on such a host, the dispatch now **fails fast** (exit `64`) with an actionable message rather than letting every shell command fail cryptically — either use `danger-full-access`, or lift the restriction (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Any other `CODEX_SANDBOX` value fails validation with exit `64`. |
-| **Network failure downloading the binary (exit 7)** | Offline-install: download `codex-dispatch_<os>-<arch>.tar.gz` + `checksums.txt` from the [releases page](https://github.com/semanta-dev/codex-dispatch/releases) into `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/` and re-run, or set `CODEX_DISPATCH_BIN` to a prebuilt binary. |
+| **Network failure downloading the binary (exit 7)** | Offline-install: download `codex-dispatch_<os>-<arch>.tar.gz` (`.zip` on Windows) + `checksums.txt` from the [releases page](https://github.com/semanta-dev/codex-dispatch/releases) into `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/` and re-run, or set `CODEX_DISPATCH_BIN` to a prebuilt binary. |
 | **Run reports `exit_code: 4` (no meaningful edits)** | The turn produced no repo edits. Tighten the task/acceptance, add relevant `--files`, and re-dispatch. (This is a `result.json` value, not a process exit code; detached runs never report it.) |
 
 See [`docs/configuration.md#troubleshooting`](docs/configuration.md#troubleshooting) for the expanded version.
