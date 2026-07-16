@@ -143,8 +143,8 @@ func TestEnvFromOSPopulatesDefaults(t *testing.T) {
 	t.Setenv("CODEX_ACCEPTANCE", "a")
 	t.Setenv("CODEX_SANDBOX", "")
 	env := EnvFromOS(os.Getenv)
-	if env.Sandbox != "danger-full-access" {
-		t.Fatalf("default sandbox = %q, want danger-full-access", env.Sandbox)
+	if env.Sandbox != "workspace-write" {
+		t.Fatalf("default sandbox = %q, want workspace-write", env.Sandbox)
 	}
 	if env.Task != "t" || env.Acceptance != "a" {
 		t.Fatalf("Task/Acceptance not populated: %+v", env)

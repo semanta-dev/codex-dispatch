@@ -301,7 +301,7 @@ Do not commit, branch, push, revert, stash, or mutate git history."""
             "CODEX_ACCEPTANCE": acceptance,
             "CODEX_FILES": ",".join(file_context),
             "CODEX_CONSTRAINTS": constraints,
-            "CODEX_SANDBOX": os.environ.get("CODEX_SANDBOX", "danger-full-access"),
+            "CODEX_SANDBOX": os.environ.get("CODEX_SANDBOX", "workspace-write"),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )

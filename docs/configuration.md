@@ -19,7 +19,7 @@ aspirational — if a knob is listed, the binary or a script reads it.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CODEX_SANDBOX` | `danger-full-access` | Codex sandbox policy. One of `read-only`, `workspace-write`, `danger-full-access`. Any other value fails validation (exit `64`). |
+| `CODEX_SANDBOX` | `workspace-write` | Codex sandbox policy. One of `read-only`, `workspace-write`, `danger-full-access` (explicit opt-in; disables the sandbox). Any other value fails validation (exit `64`). |
 | `CODEX_WORKDIR` | unset (auto-derived) | Directory codex should treat as its thread cwd. Used as-is if absolute, else resolved relative to the invocation cwd. Lets you pin a dispatch to a module subdirectory of a `go.work` monorepo (one git repo at the parent, modules like `./shared ./server` beneath it) without changing process cwd. **When unset and the dispatch is invoked at the repo root, the module is auto-derived from `CODEX_FILES`** — codex runs in the nearest ancestor of all seeded files that carries a module manifest (`go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json`, `build.gradle`, `pom.xml`); files spanning two modules (or none with a sub-manifest) stay at the repo root. The broker is still keyed on the repo root (one broker per repo); only codex's per-thread cwd changes. A value outside the repo root falls back to the repo root. |
 | `CODEX_MODEL` | unset (codex default) | Pin the codex model for the dispatch (e.g. `gpt-5.5`); passed through to the app-server `thread/start`. When unset, codex uses its configured default. Set this to match the model your `codex exec` uses when you need consistent behavior (e.g. image/vision reads). |
 | `CODEX_DISPATCH_TIMEOUT_MS` | unset (no timeout) | Per-dispatch wall-clock budget in milliseconds. On timeout the run returns promptly with `exit_code: 124` recorded in `result.json`. A missing/zero/invalid value means no timeout. |
@@ -196,10 +196,11 @@ instead. The broker self-exits after `CODEX_BROKER_IDLE_MS` (5 min) of idle.
 
 ### Codex sandbox errors
 
-By default dispatch uses `CODEX_SANDBOX=danger-full-access` to avoid codex CLI
-sandbox failures in plugin launches. If you set a stricter policy and hit
-sandbox-denied errors, the valid values are `read-only`, `workspace-write`,
-and `danger-full-access`; anything else fails validation with exit `64`.
+By default dispatch uses `CODEX_SANDBOX=workspace-write` — the least-privilege
+sandbox that still lets Codex edit the working tree. `danger-full-access`
+disables the sandbox entirely and must be requested explicitly. The valid values
+are `read-only`, `workspace-write`, and `danger-full-access`; anything else fails
+validation with exit `64`.
 
 Codex's Linux sandbox uses **bubblewrap**, which needs unprivileged user
 namespaces. On hosts that restrict them — e.g. Ubuntu with
@@ -208,10 +209,11 @@ namespaces. On hosts that restrict them — e.g. Ubuntu with
 turn fails with `bwrap: setting up uid map: Permission denied`. To avoid burying
 that in per-command output, the broker runs a one-shot `command/exec` preflight
 before starting the turn: when the requested sandboxed mode can't initialize, the
-dispatch **fails fast** with exit `64` and an actionable message. The default
-`danger-full-access` never invokes bubblewrap, so it is skipped by the preflight
-and unaffected. Fixes: use `danger-full-access`, or lift the host restriction
-with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+dispatch **fails fast** with exit `64` and an actionable message. Because
+`workspace-write` is now the default, a restricted host hits this preflight on a
+default run. Fixes: set `CODEX_SANDBOX=danger-full-access` (the explicit opt-in,
+which never invokes bubblewrap and is skipped by the preflight), or lift the host
+restriction with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
 
 ### Network failure during binary download (exit 7)
 
