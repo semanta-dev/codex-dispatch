@@ -999,8 +999,9 @@ func (a *AppServer) ExitErr() error {
 // --------------------------------------------------------------------------
 
 // sandboxModeString validates an incoming sandbox mode and returns the codex
-// SandboxMode enum string. Empty input is mapped to "danger-full-access" (the
-// dispatch default).
+// SandboxMode enum string. Empty input is mapped to "workspace-write" (the
+// dispatch default); "danger-full-access" disables the sandbox and must be
+// requested explicitly.
 //
 // Note: ThreadStartParams uses `sandbox` (SandboxMode enum string).
 // TurnStartParams uses `sandboxPolicy` (SandboxPolicy discriminated union).
@@ -1010,7 +1011,7 @@ func sandboxModeString(mode string) (string, error) {
 	case "read-only", "workspace-write", "danger-full-access":
 		return mode, nil
 	case "":
-		return "danger-full-access", nil
+		return "workspace-write", nil
 	default:
 		return "", fmt.Errorf("unknown sandbox mode %q", mode)
 	}

@@ -2,7 +2,7 @@
 
 A Claude Code plugin that delegates well-scoped coding tasks to the local OpenAI Codex CLI and reviews Codex's output through a structured verdict loop.
 
-> **Status:** v0.3.3. The dispatch core is a single Go binary (`codex-dispatch`) distributed via GitHub Releases; the shell scripts are thin launchers that resolve and exec the binary. New dispatch planning should use the GraphRAG packet workflow under `docs/graphrag/plans/`; the old Superpowers planning docs are historical reference only and are not required at runtime.
+> **Status:** v0.5.0. The dispatch core is a single Go binary (`codex-dispatch`) distributed via GitHub Releases; the shell scripts are thin launchers that resolve and exec the binary. New dispatch planning should use the GraphRAG packet workflow, whose plan and spec files live under `docs/graphrag/` in your target project.
 
 ## Quickstart
 
@@ -65,7 +65,7 @@ Codex's edits land directly in your working tree. The plugin never commits, bran
 - `graphrag-codex-dispatch` subagent — packet-oriented route that preserves GraphRAG allowed-file, verification, and progress-record rules.
 - `codex-reviewer` subagent — structured pass / needs-changes / fail verdicts that drive the iteration loop and decide whether to resume Codex's session or start fresh.
 
-All surfaces share a single shell dispatch core (`scripts/dispatch-codex.sh`) and a per-run artifact contract.
+All surfaces share a single Go dispatch core (the `codex-dispatch` binary, launched via `scripts/dispatch-codex.sh`) and a per-run artifact contract.
 
 ## Prerequisites
 
@@ -273,7 +273,7 @@ A completed Codex turn that produces no meaningful repository edits is recorded 
 
 ## Safety constraints
 
-- Codex runs as `codex app-server` (JSON-RPC v2 over stdio), pinned to `approvalPolicy: "never"`. By default dispatch uses `danger-full-access` to avoid Codex CLI sandbox failures in plugin launches. Override with `CODEX_SANDBOX` before invoking the slash command or subagent if you want `read-only` or `workspace-write`. The broker spawns one long-lived `codex app-server` child per working tree and recycles it on broker idle-out (5 min default).
+- Codex runs as `codex app-server` (JSON-RPC v2 over stdio), pinned to `approvalPolicy: "never"`. By default dispatch uses `workspace-write`, the least-privilege sandbox that still lets Codex edit the working tree. Set `CODEX_SANDBOX` before invoking the slash command or subagent to choose `read-only`, or to opt into `danger-full-access` (which disables the sandbox entirely — see the sandbox troubleshooting note below). The broker spawns one long-lived `codex app-server` child per working tree and recycles it on broker idle-out (5 min default).
 - The plugin does not commit, push, branch, or modify git history. You own the working tree.
 - Pre-existing uncommitted changes are preserved; the reviewer only sees Codex-attributable diffs.
 - No remote Codex endpoints (Codex Cloud, OpenAI API). Subprocess to the local CLI only.
@@ -309,7 +309,7 @@ Common knobs are summarized below; the full, source-verified reference (broker, 
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CODEX_SANDBOX` | `danger-full-access` | Codex sandbox policy: `read-only`, `workspace-write`, or `danger-full-access`. |
+| `CODEX_SANDBOX` | `workspace-write` | Codex sandbox policy: `read-only`, `workspace-write`, or `danger-full-access` (explicit opt-in; disables the sandbox). |
 | `CODEX_WORKDIR` | unset (auto-derived) | Pin codex's thread cwd to a module subdirectory of a `go.work` monorepo (absolute, or relative to the invocation cwd). When unset, the module is auto-derived from `CODEX_FILES` (nearest ancestor of the seeded files with a module manifest). The broker stays keyed on the repo root; only the per-thread cwd changes. Outside the repo root → falls back to the root. |
 | `CODEX_MODEL` | unset (codex default) | Pin the codex model (e.g. `gpt-5.5`); unset uses codex's configured default. |
 | `CODEX_DISPATCH_TIMEOUT_MS` | unset (no timeout) | Per-dispatch wall-clock budget in ms; on timeout the run records `exit_code: 124` in `result.json`. |
@@ -360,7 +360,7 @@ Two layers return codes from disjoint ranges. Full table in [`docs/configuration
 | **Dispatch fails right after the broker starts (app-server handshake error)** | codex-dispatch needs `codex >= 0.130.0` (the app-server protocol). Run `codex --version` and upgrade the [codex CLI](https://github.com/openai/codex) if it is older. |
 | **`codex` not found (exit 3)** | Put `codex` on `$PATH`, or point the broker at it with `CODEX_BROKER_CODEX_BIN`. |
 | **Broker won't start / stale `broker.addr`** | The dispatch path auto-heals a dead endpoint (pings, then respawns). To force a clean restart: `codex-dispatch dispatch --list`, then `rm -f .codex-dispatch/broker.addr .codex-dispatch/broker.pid` and re-dispatch. If you set `CODEX_BROKER_ADDR_PATH`, remove that path instead. |
-| **Codex sandbox-denied / `bwrap: setting up uid map: Permission denied`** | Codex's Linux sandbox uses bubblewrap, which needs unprivileged user namespaces. On hosts that restrict them (e.g. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), `read-only`/`workspace-write` can't start the sandbox. The default `CODEX_SANDBOX=danger-full-access` skips the sandbox and is unaffected. If you request a sandboxed mode on such a host, the dispatch now **fails fast** (exit `64`) with an actionable message rather than letting every shell command fail cryptically — either use `danger-full-access`, or lift the restriction (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Any other `CODEX_SANDBOX` value fails validation with exit `64`. |
+| **Codex sandbox-denied / `bwrap: setting up uid map: Permission denied`** | Codex's Linux sandbox uses bubblewrap, which needs unprivileged user namespaces. On hosts that restrict them (e.g. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), the sandboxed modes `read-only`/`workspace-write` can't start the sandbox. Because `workspace-write` is now the default, on such a host the dispatch **fails fast** (exit `64`) with an actionable message rather than letting every shell command fail cryptically — either set `CODEX_SANDBOX=danger-full-access` (the explicit opt-in that skips the sandbox), or lift the restriction (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Any unrecognized `CODEX_SANDBOX` value fails validation with exit `64`. |
 | **Network failure downloading the binary (exit 7)** | Offline-install: download `codex-dispatch_<os>-<arch>.tar.gz` (`.zip` on Windows) + `checksums.txt` from the [releases page](https://github.com/semanta-dev/codex-dispatch/releases) into `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/` and re-run, or set `CODEX_DISPATCH_BIN` to a prebuilt binary. |
 | **Run reports `exit_code: 4` (no meaningful edits)** | The turn produced no repo edits. Tighten the task/acceptance, add relevant `--files`, and re-dispatch. (This is a `result.json` value, not a process exit code; detached runs never report it.) |
 
@@ -385,7 +385,6 @@ Reviewer-subagent fixtures live under `tests/fixtures/reviewer/` and are exercis
 
 - Configuration reference (environment variables, exit codes, command guide, troubleshooting): [`docs/configuration.md`](docs/configuration.md)
 - GraphRAG workflow integration: [`docs/graphrag-workflow-integration.md`](docs/graphrag-workflow-integration.md)
-- Historical design and implementation notes live under `docs/superpowers/`; they are retained only as archive material and are not part of the active dispatch workflow.
 
 ## License
 

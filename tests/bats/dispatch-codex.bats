@@ -39,6 +39,9 @@ setup() {
   unset CODEX_RESULT_DIR
   unset CODEX_FILES CODEX_CONSTRAINTS CODEX_CONVENTIONS_FILE
   unset CODEX_SESSION_ID CODEX_FEEDBACK
+  # Ensure a leaked CODEX_SANDBOX from the developer's shell env does not defeat
+  # the default-sandbox test; tests that exercise a specific mode set it locally.
+  unset CODEX_SANDBOX
 
   # The CLAUDE_SESSION_ID env is what internal/codex.deriveSessionID reads;
   # set a stable value so tasks land under a known session in the broker.
@@ -385,26 +388,26 @@ _codex_wait_terminal() {
   grep -qE $'^thread/start\t' "$rpc_log"
 }
 
-@test "CODEX_SANDBOX flows into thread/start params (default danger-full-access)" {
+@test "CODEX_SANDBOX flows into thread/start params (default workspace-write)" {
   local rpc_log="$FAKE_BIN/rpc-sandbox.log"
   export CODEX_RESULT_DIR="$TEST_REPO/run-sandbox-default"
   export FAKE_APPSERVER_RPC_LOG="$rpc_log"
   export FAKE_APPSERVER_SESSION="sess-sandbox-default"
   run "$DISPATCH"
   [ "$status" -eq 0 ]
-  grep -qE $'^thread/start\t.*"sandbox":"danger-full-access"' "$rpc_log"
-}
-
-@test "CODEX_SANDBOX=workspace-write overrides the default" {
-  local rpc_log="$FAKE_BIN/rpc-sandbox-workspace.log"
-  export CODEX_RESULT_DIR="$TEST_REPO/run-sandbox-workspace"
-  export FAKE_APPSERVER_RPC_LOG="$rpc_log"
-  export FAKE_APPSERVER_SESSION="sess-sandbox-workspace"
-  export CODEX_SANDBOX="workspace-write"
-  run "$DISPATCH"
-  [ "$status" -eq 0 ]
   grep -qE $'^thread/start\t.*"sandbox":"workspace-write"' "$rpc_log"
   run ! grep -qE $'^thread/start\t.*"sandbox":"danger-full-access"' "$rpc_log"
+}
+
+@test "CODEX_SANDBOX=danger-full-access overrides the default (explicit opt-in)" {
+  local rpc_log="$FAKE_BIN/rpc-sandbox-danger.log"
+  export CODEX_RESULT_DIR="$TEST_REPO/run-sandbox-danger"
+  export FAKE_APPSERVER_RPC_LOG="$rpc_log"
+  export FAKE_APPSERVER_SESSION="sess-sandbox-danger"
+  export CODEX_SANDBOX="danger-full-access"
+  run "$DISPATCH"
+  [ "$status" -eq 0 ]
+  grep -qE $'^thread/start\t.*"sandbox":"danger-full-access"' "$rpc_log"
 }
 
 @test "CODEX_SANDBOX with invalid value exits 64" {

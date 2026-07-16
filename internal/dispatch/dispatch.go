@@ -27,7 +27,10 @@ type Env struct {
 func EnvFromOS(getenv func(string) string) Env {
 	sb := getenv("CODEX_SANDBOX")
 	if sb == "" {
-		sb = "danger-full-access"
+		// Default to the least-privilege sandbox that still lets Codex edit the
+		// working tree. `danger-full-access` disables the sandbox entirely and
+		// must be opted into explicitly via CODEX_SANDBOX.
+		sb = "workspace-write"
 	}
 	return Env{
 		Task:            getenv("CODEX_TASK"),
