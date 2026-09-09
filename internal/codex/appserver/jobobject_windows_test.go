@@ -90,7 +90,10 @@ func TestWindowsJobTerminatesDescendants(t *testing.T) {
 			if err := command.Start(); err != nil {
 				t.Fatal(err)
 			}
-			defer command.Process.Kill()
+			defer func() {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}()
 			control := newChildController()
 			defer control.close()
 			if mode != "owner-crash" {
@@ -106,11 +109,14 @@ func TestWindowsJobTerminatesDescendants(t *testing.T) {
 			}
 			handles := []windows.Handle{}
 			for _, pid := range []int{parent, leaf} {
-				h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+				h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE, false, uint32(pid))
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer windows.CloseHandle(h)
+				defer func() {
+					_ = windows.TerminateProcess(h, 1)
+					_ = windows.CloseHandle(h)
+				}()
 				handles = append(handles, h)
 			}
 			switch mode {
@@ -125,7 +131,6 @@ func TestWindowsJobTerminatesDescendants(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_ = command.Wait()
 			for _, handle := range handles {
 				result, err := windows.WaitForSingleObject(handle, 5000)
 				if err != nil || result != windows.WAIT_OBJECT_0 {

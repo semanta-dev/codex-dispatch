@@ -133,7 +133,7 @@ func TestFailedPersistenceCannotResurrectStaleArchive(t *testing.T) {
 	if err := table.MarkRunning(id); err != nil {
 		t.Fatal(err)
 	}
-	makeTaskStoreReadOnly(t, dir)
+	denyTaskStoreReplacement(t, dir)
 	if err := table.MarkDone(id, 0, "session", false); err == nil {
 		t.Fatal("persistence failure not surfaced")
 	}

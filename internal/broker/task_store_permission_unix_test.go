@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func makeTaskStoreReadOnly(t *testing.T, dir string) {
+func denyTaskStoreReplacement(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.Chmod(dir, 0500); err != nil {
 		t.Fatal(err)

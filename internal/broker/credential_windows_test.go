@@ -107,42 +107,32 @@ func TestCredentialDeniesSecondUnprivilegedPrincipal(t *testing.T) {
 	}
 }
 
-func makeTaskStoreReadOnly(t *testing.T, dir string) {
+// Hold existing archive files without FILE_SHARE_DELETE. Windows then denies
+// atomic replacement even to a privileged CI runner. A directory DACL alone is
+// insufficient because os.Root uses backup-intent opens and may retain rights.
+func denyTaskStoreReplacement(t *testing.T, dir string) {
 	t.Helper()
-	original, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalACL, _, err := original.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		t.Fatal(err)
-	}
-	readonly, err := windows.SecurityDescriptorFromString("D:P(A;;FRFX;;;" + user.User.Sid.String() + ")")
-	if err != nil {
-		t.Fatal(err)
-	}
-	acl, _, err := readonly.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, originalACL, nil)
-		runtime.KeepAlive(original)
-		if err != nil {
-			t.Error(err)
+	locked := 0
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
 		}
-	})
-	probe, err := os.CreateTemp(dir, "probe")
-	if err == nil {
-		probe.Close()
-		os.Remove(probe.Name())
-		t.Fatal("Windows DACL did not deny writes")
+		name, err := windows.UTF16PtrFromString(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+		locked++
+	}
+	if locked == 0 {
+		t.Fatal("no archive file available for replacement denial")
 	}
 }
