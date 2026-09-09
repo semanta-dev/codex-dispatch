@@ -99,10 +99,16 @@ CODEX_WORKDIR="$WORKDIR" \
 CODEX_CONSTRAINTS="$CONSTRAINTS" \
 CODEX_FEEDBACK="$feedback" \
 CODEX_SESSION_ID="$prev_session" \
-  "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch-codex.sh"
+REVIEW_TEST_POLICY="$TEST_POLICY" \
+REVIEW_TEST_CMD="$TEST_CMD" \
+REVIEW_VERIFY_CMD="$VERIFY_CMD" \
+REVIEW_CLEAN_VERIFY="$CLEAN_VERIFY" \
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review-evidence.py"
 ```
 
-The last stdout line is the run directory absolute path (`RUN_DIR`). `CODEX_WORKDIR` empty is fine — codex then runs at the repo root. Read `$RUN_DIR/result.json` — it has `exit_code`, `session_id`, `files_changed`, `lines_added`, `lines_removed`, `stdout_path`, `diff_path`, `fell_back_to_fresh`, `error_message`.
+The single JSON response is the evidence bundle. Set `RUN_DIR = bundle.run_dir` and `result = bundle.result`. A nonzero helper exit, `error`, missing required evidence, or oversized diff means `fail / reviewer-error`; never infer a pass from an incomplete bundle. The helper runs dispatch and the requested checks, preserving full output under RUN_DIR. Identical test and verification commands share one execution unless clean verification requires a separate checkout.
+
+Use the complete bundled diff, result, changed-file type/mode/hash facts, and command results directly. Do not repeat reads, tests, status or stat calls when these facts answer the criteria. Additional inspection is required only for an unresolved criterion or truncated command output needed to judge it. Never skip independent review or infer acceptance solely from helper success.
 
 ### 5b. Short-circuit codex errors
 
@@ -117,7 +123,7 @@ Else if `result.exit_code != 0`:
 - Tail `$RUN_DIR/stdout.log` (last 30 lines) — keep for the final report
 - Break the loop
 
-If `result.lines_added + result.lines_removed == 0` (a no-changes run not already flagged as exit 4):
+If `result.files_changed is empty` (after validating files_changed as an array; binary and mode-only edits have zero text-line counts):
 - `last_verdict = fail`, `last_reason = no-changes`
 - Break the loop
 
@@ -136,7 +142,7 @@ If codex appears to be solving a fundamentally different problem (e.g., asked fo
 
 This check takes precedence over individual unmet criteria: an unrelated solution needs a fresh session. An incomplete or buggy attempt at the requested solution remains `needs-changes / criterion-not-met`.
 
-Read `$RUN_DIR/diff.patch`. For each line in `ACCEPTANCE`, state whether the diff addresses it. If any criterion is unaddressed:
+Evaluate `bundle.diff`. For each line in `ACCEPTANCE`, state whether the diff addresses it. If any criterion is unaddressed:
 - `verdict = needs-changes`, `reason = criterion-not-met`
 - Add each unmet criterion to feedback bullets
 
@@ -144,14 +150,15 @@ Treat every criterion as a standing requirement: one a prior iteration satisfied
 
 **Check 2: Unit tests.** Skip if `TEST_POLICY = skip` or `TEST_CMD` is empty.
 
-Otherwise, run `TEST_CMD` via Bash. Capture exit code and last 30 lines of output.
+Otherwise, evaluate `bundle.test`; a missing result is `fail / reviewer-error`. Use its exit code and captured output. Do not rerun the command.
 - If exit != 0: `verdict = needs-changes`, `reason = tests-failing`. Add failing test summary + last 30 lines of output to feedback.
 
 **Check 2b: Behavioral verification (acceptance altitude).** Unit-tests-green ≠ acceptance-criteria-demonstrated. Decide whether any criterion describes *runtime/integration/deploy* behavior (cues: "returns", "logs in", "denies", "renders", "starts", "the flow", "end-to-end", a status code, a page, a cross-service interaction).
-- If `VERIFY_CMD` is set: run it via Bash. When `CLEAN_VERIFY` is true, run it through `"${CLAUDE_PLUGIN_ROOT}/scripts/clean-verify.sh" "$RUN_DIR" <VERIFY_CMD>` — it applies codex's diff onto a throwaway `git worktree` of HEAD and runs the command there, so dirty-tree or gitignored/uncommitted state can't make verification falsely pass (a diff that won't apply to clean HEAD is itself a signal). Otherwise run `VERIFY_CMD` directly in the working tree. Exit != 0 → `verdict = needs-changes`, `reason = verification-failing`; add the tail to feedback.
+- If `VERIFY_CMD` is set: evaluate `bundle.verification`, including the recorded clean-checkout flag. Missing evidence is `fail / reviewer-error`. Exit != 0 means `needs-changes / verification-failing`; include the diagnostic. Identical test/verify commands may explicitly reuse one result. Do not execute them again.
+- If `bundle.verification_mutations` is nonempty, verification changed the reviewed tree: `needs-changes / verification-failing`. Name the paths; the captured diff no longer proves the final tree and must be recaptured on the next iteration.
 - If `VERIFY_CMD` is empty but a behavioral criterion exists: do NOT pass on unit tests alone → `verdict = needs-changes`, `reason = verification-insufficient`. In feedback, name the behavioral criterion unit tests don't prove and ask for a `--verify-cmd` (or an integration test). This is the gate that stops a broken runtime from passing as "done".
 
-**Check 3: Scope (paths + behavior + magnitude).** Read `$RUN_DIR/result.json`.
+**Check 3: Scope (paths + behavior + magnitude).** Evaluate the bundled result and complete diff.
 - Paths: a path unrelated to `TASK`/`CONSTRAINTS`, or any entry in `result.files_changed_outside_seed` (when `FILES` was set), is out of scope.
 - Behavior: every changed hunk must trace to a criterion. Unrequested features/abstractions/"improvements" are scope-creep **even inside allowed files**.
 - Magnitude: if `result.lines_added` is large relative to what the criteria imply with no justification, treat as the behavior case.

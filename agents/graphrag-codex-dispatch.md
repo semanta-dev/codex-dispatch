@@ -225,7 +225,7 @@ run directory. Then read:
 Short-circuit failures:
 
 - `result.exit_code != 0`: fail with `codex-error`.
-- `lines_added + lines_removed == 0`: fail with `no-changes`.
+- `files_changed is empty`: fail with `no-changes`.
 
 Review after each dispatch:
 

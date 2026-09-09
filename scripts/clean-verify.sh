@@ -22,6 +22,7 @@
 #   <verify-cmd's exit code>  normal pass/fail of the verification
 #   2   usage error (missing run_dir or verify command)
 #   6   required tool missing (git) or run_dir/diff.patch not found
+#   66  verification changed reviewed source or staging
 #   65  codex's diff did not apply cleanly to the recorded baseline (depends on uncommitted state)
 
 set -euo pipefail
@@ -67,9 +68,53 @@ if [ -s "$diff_path" ]; then
   fi
 fi
 
-# Run the verification in the isolated tree; propagate its exit code verbatim.
-set +e
-( cd "$wt" && "$@" )
-rc=$?
-set -e
-exit "$rc"
+# Audit inside the worktree before cleanup: verification must exercise exactly
+# the applied patch, not repair source to make its own assertion succeed.
+( cd "$wt" && python3 - "$@" <<'PYVERIFY'
+import hashlib
+import os
+import stat
+import shutil
+from pathlib import Path
+import subprocess
+import sys
+
+
+def snapshot():
+    names = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+    result = {}
+    for name in set(names.split(b"\0")) - {b""}:
+        try:
+            info = os.lstat(name)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            content = os.fsencode(os.readlink(name))
+        elif stat.S_ISREG(info.st_mode):
+            with open(name, "rb") as source:
+                content = source.read()
+        else:
+            raise ValueError("cannot verify special file: " + os.fsdecode(name))
+        result[os.fsdecode(name)] = (info.st_mode, hashlib.sha256(content).hexdigest())
+    result[".git/index"] = subprocess.check_output(["git", "ls-files", "--stage", "-z"])
+    return result
+
+before = snapshot()
+shell = shutil.which("bash")
+if os.name == "nt":
+    cygpath = shutil.which("cygpath")
+    if not cygpath:
+        raise RuntimeError("Git Bash required for clean verification")
+    shell = str(Path(cygpath).with_name("bash.exe"))
+args = sys.argv[1:]
+if args[0] == "bash":
+    args[0] = shell
+rc = subprocess.run([shell, "-c", 'exec "$@"', "clean-verify", *args]).returncode
+after = snapshot()
+changed = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+if changed:
+    print("clean-verify: verification changed reviewed source or staging: " + ", ".join(changed), file=sys.stderr)
+    sys.exit(66)
+sys.exit(rc if rc >= 0 else 128 - rc)
+PYVERIFY
+)

@@ -74,3 +74,65 @@ These are single observations, not median/p95 promotion results. The filesystem
 rejected an invalid-UTF-8 filename before hashing; octal quoting of that byte is
 unit-tested, while newline/tab/quote/backslash/Unicode names receive real patch
 replay tests. Native filesystem portability remains unverified.
+
+## Repeated snapshot observation, 2026-09-09
+
+Ten fresh fixture repetitions per size, same Linux host and toolchain, using
+`go test ./internal/diff -run '^$' -bench BenchmarkSnapshotRoundTrip -benchtime=1x -count=10`:
+
+| Files | Median | p95 (nearest rank) |
+|---|---:|---:|
+| 1,000 | 0.353 seconds | 0.409 seconds |
+| 10,000 | 1.977 seconds | 2.082 seconds |
+
+Raw output: `/tmp/plan-a-snapshot-benchmark-10.txt`. The ten-percent live-task
+comparison remains pending the full paired corpus.
+
+## Paired executable protocol
+
+`tests/benchmark/paired.py` freezes separate identical repositories for all
+30 cases per arm before running any model. The actual plugin invocation uses
+`/codex-dispatch:codex`, its Haiku orchestrator, inline review, and a three-attempt
+cap. Direct Codex receives the same task facts and an explicit-session retry
+policy driven by the independent oracle. Both use gpt-5.5, medium reasoning,
+workspace-write, approval never, and no MCP servers in isolated configuration.
+
+CTO approved the previously unspecified dollar metric as **published-rate-equivalent
+USD before paired measurement**. This is not actual proxy billing or promised
+bill savings. The 1.25x threshold is unchanged. Archive the dated official source
+https://developers.openai.com/api/docs/pricing.md alongside the manifest. At the
+2026-09-09 retrieval, gpt-5.5 short-context rates per million tokens were $5 input,
+$0.50 cached input, and $30 output. Claude list-basis aggregate cost is counted
+once only after reconciling router and subagent usage. Missing usage or
+unreconciled aggregation leaves the cost gate unverified.
+
+Smoke runs are instrumentation checks, excluded from promotion denominators.
+The first C01 smoke in `/tmp/plan-a-paired-smoke-v1` is invalid for matched
+comparison: a local `.zshenv` overrode CODEX_SANDBOX before broker admission.
+No broker policy enforcement defect was established. Isolating ZDOTDIR and
+shell configuration for both arms corrected actual rollout policies.
+
+The second C01 smoke in `/tmp/plan-a-paired-smoke-v2` passed independent exact
+behavior, staging, recovery/patch replay, route, policy and usage audits. Direct
+execution took 10.64s at $0.042351 equivalent; reviewed execution took 59.99s at
+$0.186675 equivalent. These excluded smoke results indicate a material cost and
+latency risk, not a completed corpus result. `tests/benchmark/audit.py` performs
+the independent audit and leaves missing evidence as failures.
+
+
+The lean reviewed-route candidate retains the advertised slash command and
+independent Haiku review. It bundles full evidence into one helper call,
+deduplicates identical test/verification commands, and launches Claude with
+`--tools Agent,Skill,Bash,Read,Grep,Glob --effort low`. These remove unused tool
+schemas and redundant execution; all model calls and review costs still count.
+The executable manifest pins these settings before measurement. Freeze with:
+
+```sh
+CODEX_HOME=/path/to/private-pinned-config python3 tests/benchmark/paired.py freeze /path/to/new-archive --pricing-source /path/to/official-pricing.md
+CODEX_HOME=/path/to/private-pinned-config python3 tests/benchmark/paired.py run /path/to/new-archive
+python3 /path/to/new-archive/audit.py /path/to/new-archive /path/to/private-pinned-config
+```
+
+`--limit` marks a partial smoke, never a promotion cohort. The original seven
+reviewer fixtures remain mandatory; binary-deletion and mode-only fixtures add
+coverage without replacing any original denominator.

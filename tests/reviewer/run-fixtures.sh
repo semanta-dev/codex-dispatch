@@ -18,7 +18,8 @@
 # Coverage note (inlined orchestrator reviewer path + exit_code==4):
 #   The codex-orchestrator inlines this same review logic (orchestrator step 5c
 #   == codex-reviewer sections 1-6), so a fixture that exercises codex-reviewer
-#   also validates the orchestrator's inline reviewer. The two short-circuit
+#   does not establish the inline Haiku reviewer's measured accuracy. Exercise
+#   the actual orchestrator route separately. The two short-circuit
 #   contracts must agree: `exit_code == 4` is the dispatch core's "completed
 #   without meaningful edits" sentinel and MUST map to REASON=no-changes, not
 #   codex-error. To cover that path, drop a fixture under

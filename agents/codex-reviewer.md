@@ -78,7 +78,9 @@ Evaluate these in order. `exit_code == 4` is the dispatch core's "completed with
 
 - If `RESULT PATH` is provided, read it. If `exit_code == 4`: `VERDICT: fail / REASON: no-changes`.
 - Else if `exit_code != 0`: `VERDICT: fail / REASON: codex-error`. Quote the last 10 lines of `stdout.log` in `DETAILS`.
-- If the diff is empty (zero bytes, or no `diff --git` headers, or `lines_added + lines_removed == 0` per result.json): `VERDICT: fail / REASON: no-changes`.
+- If the diff is empty (zero bytes or no `diff --git` headers): `VERDICT: fail / REASON: no-changes`.
+
+Binary patches and mode-only changes are meaningful edits even when both text-line counts are zero. Do not reject them as no-changes.
 
 ### 2. Acceptance criteria
 

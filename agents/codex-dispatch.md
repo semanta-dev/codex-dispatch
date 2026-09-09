@@ -132,7 +132,7 @@ Evaluate in this order. `exit_code == 4` is the dispatch core's "completed witho
 
 - `result.exit_code == 4` → `last_verdict = fail`, `last_reason = no-changes`, break.
 - `result.exit_code != 0` → `last_verdict = fail`, `last_reason = codex-error`, break.
-- `lines_added + lines_removed == 0` (a no-changes run not already flagged as exit 4) → `last_verdict = fail`, `last_reason = no-changes`, break.
+- `files_changed is empty` (after validating files_changed as an array; binary and mode-only edits have zero text-line counts) → `last_verdict = fail`, `last_reason = no-changes`, break.
 
 ### Review
 

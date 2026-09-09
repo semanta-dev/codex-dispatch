@@ -143,3 +143,59 @@ Single observations improved baseline-plus-capture from 10.287s to 0.377s at
 1,000 files and 103.110s to 2.080s at 10,000 files. See the benchmark protocol
 for measurement limits. Invalid-UTF-8 filesystem names were unsupported on this
 host; their quoting is unit-tested separately from supported-name replay tests.
+
+
+## Native and live evaluation checkpoint, 2026-09-09
+
+Plan A (Repair) continues under CTO NO-GO. Review branch `codex/plan-a-repair`
+has been pushed for authorized hosted validation; no merge or release occurred.
+Candidate 0be939f passed local nine-package Go race tests, lint (zero issues),
+80 selected native shell cases and eight Python cases. Hosted run 34417094793
+passed Linux amd64/arm64 and macOS arm64; Windows exposed an ineffective
+permission fault fixture, now changed to native sharing-lock replacement denial.
+The prior failed runs remain available as evidence.
+
+The initial complete reviewer cohort in `/tmp/plan-a-reviewer-20260909` scored
+7/10 for fail-approach and 10/10 for each other fixture. The decision ordering
+has been corrected in both reviewer and inline orchestrator instructions; a
+separate complete cohort is running in `/tmp/plan-a-reviewer-20260909-v2`.
+Standalone Sonnet accuracy is not evidence of inline Haiku accuracy.
+
+Additional native tests exercise protected Windows credentials against a second
+unprivileged principal with an accessible control, Windows Job descendant
+termination/handle-close/owner-crash, and the production broker restart shell
+path. Cross-compilation is not credited as native execution. Full hosted pass,
+reviewed-route benchmark and CTO final review remain open gates.
+
+
+### Evidence collection correction and policy confirmation
+
+The v2 reviewer responses matched all 70 expected judgments, but the harness
+itself exited with a syntax error after a concurrent comment edit shifted Bash's
+read offset. It is retained as a failed harness run, not a passing gate. The full
+cohort has restarted from `/tmp/plan-a-reviewer-frozen-v3`, with results in
+`/tmp/plan-a-reviewer-20260909-v3`.
+
+Live policy confirmation in `/tmp/plan-a-live-policy-v2` exercised fresh and
+same-session resume against a conflicting danger-full-access configuration.
+Both actual turn contexts record workspace-write, approval never and gpt-5.5;
+hello/world output is exact. The earlier mismatched smoke came from a local
+zsh startup override before broker admission, not a demonstrated broker bypass.
+
+Windows native Go tests passed at 2b30bc4. Windows shell execution then exposed
+hard-coded `/bin/bash` and POSIX-to-native result-path handling, fixed in b9f6ca4;
+hosted run 34418133987 is validating those corrections. Linux and both macOS
+architectures have passed native Go, artifact launch and shell gates.
+
+
+### Reviewed-route repair candidate
+
+The internal evidence helper preserves full diffs and command logs, deduplicates
+identical test/verify commands, and leaves acceptance to independent Haiku review.
+It fails closed on incomplete/oversized evidence and tracks verification source
+and staging mutations. Clean verification now audits inside its temporary
+worktree before cleanup and exits 66 if verification alters the reviewed tree.
+The zero-text-line no-changes heuristic was removed from all four review routes;
+binary and mode-only edits remain meaningful. Seventeen Python regressions and
+six clean-verify Bats cases pass locally. CTO bounded recheck found no further
+blocker in these corrections; promotion GO remains pending live/native gates.

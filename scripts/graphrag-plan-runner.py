@@ -27,6 +27,7 @@ import pathlib
 import re
 import signal
 import subprocess
+import shutil
 import tempfile
 import threading
 import time
@@ -114,6 +115,20 @@ class Packet:
     verification: str
     progress_record: str
     dependencies: list[str] = field(default_factory=list)
+
+
+def bash_executable() -> str:
+    if os.name != "nt":
+        return "bash"
+    # Windows CreateProcess searches System32 before PATH for bare bash,
+    # selecting the WSL launcher even when running inside Git Bash.
+    cygpath = shutil.which("cygpath")
+    if not cygpath:
+        raise OSError("Git Bash is required for native Windows shell execution")
+    shell = pathlib.Path(cygpath).with_name("bash.exe")
+    if not shell.is_file():
+        raise OSError("Git Bash executable not found beside cygpath")
+    return str(shell)
 
 
 def normalize_section(name: str) -> str:
@@ -392,7 +407,7 @@ Do not commit, branch, push, revert, stash, or mutate git history."""
 def run_shell(command: str, repo: pathlib.Path) -> dict[str, Any]:
     started = time.monotonic()
     proc = subprocess.run(
-        ["bash", "-c", command],
+        [bash_executable(), "-c", command],
         cwd=repo,
         text=True,
         stdout=subprocess.PIPE,
@@ -467,7 +482,7 @@ def write_progress_record(
 def script_command(path: str) -> list[str]:
     # Native Python on Windows cannot directly execute POSIX shebang scripts.
     if pathlib.Path(path).suffix == ".sh":
-        return ["bash", pathlib.Path(path).as_posix()]
+        return [bash_executable(), pathlib.Path(path).as_posix()]
     return [path]
 
 

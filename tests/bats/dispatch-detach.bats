@@ -167,7 +167,7 @@ _detach_wait_terminal() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
       # Forced Windows shutdown leaves a stale PID; restart must recover it.
-      powershell.exe -NoProfile -Command "Wait-Process -Id $broker_pid -ErrorAction SilentlyContinue"
+      powershell.exe -NoProfile -Command "if (Get-Process -Id $broker_pid -ErrorAction SilentlyContinue) { Wait-Process -Id $broker_pid }; exit 0"
       ;;
     *)
       for _ in $(seq 1 100); do
