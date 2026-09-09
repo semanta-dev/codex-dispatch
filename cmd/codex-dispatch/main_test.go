@@ -579,6 +579,9 @@ func TestDetachPreexistingResultDirPreserved(t *testing.T) {
 }
 
 func TestBrokerSubcommandRoutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal routing; native process shutdown is tested separately")
+	}
 	old, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(old) })
 
@@ -610,7 +613,11 @@ func TestBrokerSubcommandRoutes(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Now safe to signal.
-	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = self.Signal(syscall.SIGTERM)
 
 	select {
 	case rc := <-done:

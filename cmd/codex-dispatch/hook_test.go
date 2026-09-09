@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -84,58 +85,33 @@ func TestHookMissingEventReturns64(t *testing.T) {
 	}
 }
 
-// fakeLineBroker runs a minimal line-protocol JSON-RPC broker on a Unix socket
-// for hook tests. handler maps method -> result and is invoked per request; a
-// nil return for a method writes no response (simulating a wedged broker). It
-// returns the socket path. The listener is closed on test cleanup.
-func fakeLineBroker(t *testing.T, handler func(method string) (any, bool)) string {
+// fakeLineBroker supplies authenticated HTTP discovery to hook tests.
+func fakeLineBroker(t *testing.T, handler func(string) (any, bool)) string {
 	t.Helper()
-	sock := t.TempDir() + "/broker.sock"
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("listen unix: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				r := bufio.NewReaderSize(c, 64*1024)
-				for {
-					line, err := broker.ReadLine(r)
-					if err != nil {
-						return
-					}
-					var env struct {
-						Method string          `json:"method"`
-						ID     json.RawMessage `json:"id"`
-					}
-					if json.Unmarshal(line, &env) != nil {
-						return
-					}
-					result, ok := handler(env.Method)
-					if !ok {
-						// Wedged broker: accept the request but never reply.
-						continue
-					}
-					resp := map[string]any{
-						"jsonrpc":           "2.0",
-						"_protocol_version": broker.ProtocolVersion,
-						"result":            result,
-						"id":                json.RawMessage(env.ID),
-					}
-					raw, _ := json.Marshal(resp)
-					raw = append(raw, '\n')
-					_, _ = c.Write(raw)
-				}
-			}(conn)
+	token := strings.Repeat("a", 64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", 401)
+			return
 		}
-	}()
-	return sock
+		var req struct {
+			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		result, ok := handler(req.Method)
+		if !ok {
+			<-r.Context().Done()
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	}))
+	t.Cleanup(srv.Close)
+	raw, _ := json.Marshal(map[string]any{"version": 2, "address": strings.TrimPrefix(srv.URL, "http://"), "token": token})
+	return string(raw)
 }
 
 // TestHookStopBlockEmitsSchemaValidDecision asserts the Stop "block" decision
@@ -154,7 +130,7 @@ func TestHookStopBlockEmitsSchemaValidDecision(t *testing.T) {
 		}
 		return map[string]any{}, true
 	})
-	t.Setenv("CODEX_DISPATCH_BROKER_SOCKET", sock)
+	t.Setenv("CODEX_DISPATCH_BROKER_ADDR", sock)
 
 	in := strings.NewReader(`{"session_id":"s1","cwd":"/x","hook_event_name":"Stop"}`)
 	var stdout, stderr bytes.Buffer
@@ -198,7 +174,7 @@ func TestHookStopHonorsStopHookActive(t *testing.T) {
 		}
 		return map[string]any{}, true
 	})
-	t.Setenv("CODEX_DISPATCH_BROKER_SOCKET", sock)
+	t.Setenv("CODEX_DISPATCH_BROKER_ADDR", sock)
 
 	in := strings.NewReader(`{"session_id":"s1","cwd":"/x","hook_event_name":"Stop","stop_hook_active":true}`)
 	var stdout, stderr bytes.Buffer

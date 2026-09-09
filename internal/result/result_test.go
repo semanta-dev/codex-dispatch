@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -134,7 +135,7 @@ func TestWriteCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("result.json not written: %v", err)
 	}
-	if got := fi.Mode().Perm(); got != 0o644 {
+	if got := fi.Mode().Perm(); runtime.GOOS != "windows" && got != 0o644 {
 		t.Fatalf("result.json permissions = %o, want 0644", got)
 	}
 }

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
@@ -133,6 +134,7 @@ func TestDispatchRunHappyPath(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -185,6 +187,7 @@ func TestDispatchRunUsesRequestCWDForThreadStart(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: brokerDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -209,7 +212,8 @@ func TestDispatchRunUsesRequestCWDForThreadStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rpc log: %v", err)
 	}
-	if !strings.Contains(string(raw), `"cwd":"`+worktreeDir+`"`) {
+	encodedCWD, _ := json.Marshal(worktreeDir)
+	if !strings.Contains(string(raw), `"cwd":`+string(encodedCWD)) {
 		t.Fatalf("thread/start did not use request cwd %q:\n%s", worktreeDir, raw)
 	}
 }
@@ -224,6 +228,7 @@ func TestDispatchRunStreamsEventsToCallback(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -270,6 +275,7 @@ func TestDispatchRunMapsFailedStatus(t *testing.T) {
 	})
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -295,6 +301,7 @@ func TestDispatchRunTaskTableReflectsState(t *testing.T) {
 	setupFakeAppserver(t, map[string]string{"FAKE_CODEX_VERSION": "0.130.0", "FAKE_APPSERVER_SESSION": "tx"})
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -330,6 +337,7 @@ func TestDispatchRunStaleResumeRetriesFresh(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -426,6 +434,7 @@ func TestCancelRunningTaskInterruptsTurnAndFreesSlot(t *testing.T) {
 
 	// cap=1 so the second task can only run after the first frees its slot.
 	state := &BrokerState{Table: NewTable(1, 2048), CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	addr := startTestBroker(t, state)
 
 	dialer, err := Dial(addr)
@@ -575,6 +584,7 @@ func TestConcurrentTaskStartSharedAppServerNoCrossTurnCorruption(t *testing.T) {
 	// thread (matching the per-thread single-turn constraint). Long idle so
 	// idle-out is not what ends the test.
 	state := &BrokerState{Table: NewTable(1, 2048), CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	addr, _ := startGuardedBroker(t, state, time.Hour)
 
 	const n = 4
@@ -684,6 +694,7 @@ func TestWedgedTurnHitsPerTurnDeadline(t *testing.T) {
 	t.Setenv("CODEX_BROKER_TURN_TIMEOUT_MS", "200")
 
 	state := &BrokerState{Table: NewTable(1, 2048), CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	addr := startTestBroker(t, state)
 	client, err := Dial(addr)
 	if err != nil {
@@ -748,6 +759,7 @@ func TestDispatchRunSandboxPreflightFailsFast(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -805,6 +817,7 @@ func TestDispatchRunSandboxPreflightSkippedForDangerFullAccess(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -842,6 +855,7 @@ func TestDispatchRunDropsRealThreadStartedAndSynthesizesOne(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()

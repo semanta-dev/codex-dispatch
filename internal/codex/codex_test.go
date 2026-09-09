@@ -161,7 +161,11 @@ func TestResolveBrokerEndpointHonorsAddrPathOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveBrokerEndpoint: %v", err)
 	}
-	if repoRoot != tmp {
+	canonicalTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repoRoot != canonicalTmp {
 		t.Fatalf("repoRoot = %q, want %q", repoRoot, tmp)
 	}
 	if !strings.HasSuffix(addrPath, filepath.Join("shared", "broker.addr")) {

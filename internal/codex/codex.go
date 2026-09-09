@@ -129,6 +129,12 @@ func threadCWD(repoRoot, workDir string) string {
 	if err != nil {
 		return repoRoot
 	}
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(absWork); err == nil {
+		absWork = resolved
+	}
 	rel, err := filepath.Rel(absRoot, absWork)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return repoRoot

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -71,7 +72,11 @@ func TestSnapshotDeltaBinaryModesAndLiteralPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, repo, "README.md", "initial\nprior WIP\ntask\n")
-	writeFile(t, repo, ":(exclude)odd*", "literal\n")
+	literalPath := ":(exclude)odd*"
+	if runtime.GOOS == "windows" {
+		literalPath = "literal[odd]"
+	}
+	writeFile(t, repo, literalPath, "literal\n")
 	writeFile(t, repo, "binary", "\x00\x01\x02")
 	if err := os.Chmod(filepath.Join(repo, "README.md"), 0755); err != nil {
 		t.Fatal(err)
@@ -212,6 +217,9 @@ func TestSnapshotBatchPreservesArbitraryPathBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := []string{"line\nbreak", "tab\there", "quote\"", "back\\slash", "unicode-雪"}
+	if runtime.GOOS == "windows" {
+		paths = []string{"space name", "bracket[name]", "unicode-雪"}
+	}
 	for _, p := range paths {
 		writeFile(t, repo, p, "raw bytes\n")
 	}

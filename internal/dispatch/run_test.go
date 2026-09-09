@@ -24,7 +24,7 @@ func TestRelativeResultDirectoryUsesInvocationDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dir != filepath.Join(repo, "relative-run") || log != filepath.Join(dir, "stdout.log") {
+	if !SameDir(dir, filepath.Join(repo, "relative-run")) || log != filepath.Join(dir, "stdout.log") {
 		t.Fatalf("incorrect paths: %s %s", dir, log)
 	}
 	// The broker owns exclusive log creation; the client must not truncate a
@@ -120,6 +120,7 @@ func startInProcessBroker(t *testing.T, repoDir string) {
 	}()
 	t.Cleanup(func() {
 		cancel()
+		state.CloseAppServer(context.Background())
 		<-done
 	})
 
@@ -665,7 +666,7 @@ func TestRunThreadsSubdirCwdToCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read recorded cwd: %v", err)
 	}
-	if string(got) != sub {
+	if !SameDir(string(got), sub) {
 		t.Fatalf("codex received cwd %q, want module subdir %q (cwd collapsed to repo root is the bug)", got, sub)
 	}
 }
@@ -717,7 +718,7 @@ func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read recorded cwd: %v", err)
 	}
-	if string(got) != sub {
+	if !SameDir(string(got), sub) {
 		t.Fatalf("codex cwd = %q, want auto-derived module %q (scoping from CODEX_FILES failed)", got, sub)
 	}
 }
