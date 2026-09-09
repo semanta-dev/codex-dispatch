@@ -82,6 +82,7 @@ func (lw *LogWriter) Close() error {
 
 // DispatchRunParams is the params shape for dispatch.run and task.start.
 type DispatchRunParams struct {
+	policy        *ExecutionPolicy
 	SessionID     string `json:"session_id"`
 	Mode          string `json:"mode"`
 	Prompt        string `json:"prompt"`
@@ -121,9 +122,10 @@ func HandleDispatchRun(state *BrokerState) Handler {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
+		p.policy, _ = ctx.Value(executionPolicyKey{}).(*ExecutionPolicy)
 		notifier := NotifierFrom(ctx)
 
-		taskID, _ := state.Table.Start(p.SessionID, TaskParams{
+		taskID, _, err := state.Table.Admit(p.SessionID, TaskParams{
 			Mode:        p.Mode,
 			Prompt:      p.Prompt,
 			Sandbox:     p.Sandbox,
@@ -132,6 +134,9 @@ func HandleDispatchRun(state *BrokerState) Handler {
 			LogPath:     p.LogPath,
 			CWD:         p.CWD,
 		})
+		if err != nil {
+			return nil, err
+		}
 		taskCtx, cleanupTask := state.registerTaskContext(ctx, taskID)
 		defer cleanupTask()
 		if st, serr := state.Table.Status(taskID); serr == nil && st.State == StateCancelled {
@@ -152,7 +157,7 @@ func HandleDispatchRun(state *BrokerState) Handler {
 			return nil, fmt.Errorf("mark running: %w", err)
 		}
 
-		logW, err := OpenLogWriter(p.LogPath)
+		logW, err := openTaskLog(taskCtx, &p)
 		if err != nil {
 			_ = state.Table.MarkErrored(taskID, -1, err.Error())
 			return nil, fmt.Errorf("open log: %w", err)
@@ -196,15 +201,21 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 	if msg := preflightSandbox(ctx, srv, p.Sandbox); msg != "" {
 		return dispatchFailure(state, logW, taskID, msg, emit)
 	}
+	if p.policy != nil {
+		if err := p.policy.validate(ctx, &p); err != nil {
+			return dispatchFailure(state, logW, taskID, "execution policy changed before turn: "+err.Error(), emit)
+		}
+	}
 
 	threadCWD := p.CWD
 	if threadCWD == "" {
 		threadCWD = state.CWD
 	}
 	threadOpts := appserver.ThreadStartOptions{
-		CWD:     threadCWD,
-		Sandbox: p.Sandbox,
-		Model:   p.Model,
+		VerifySettings: true,
+		CWD:            threadCWD,
+		Sandbox:        p.Sandbox,
+		Model:          p.Model,
 	}
 
 	var (
@@ -212,7 +223,7 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 		fellBackToFresh bool
 	)
 	if p.Mode == "resume" && p.PrevSessionID != "" {
-		t, rerr := srv.ResumeThread(ctx, p.PrevSessionID, appserver.ThreadResumeOptions{})
+		t, rerr := srv.ResumeThread(ctx, p.PrevSessionID, threadOpts)
 		if errors.Is(rerr, appserver.ErrStaleSession) {
 			_ = logW.WriteMarker()
 			emit("task.fell_back_to_fresh", map[string]any{"stale_session_id": p.PrevSessionID})

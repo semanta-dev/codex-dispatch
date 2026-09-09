@@ -74,7 +74,7 @@ All surfaces share a single Go dispatch core (the `codex-dispatch` binary, launc
 - [`codex`](https://github.com/openai/codex) CLI **version 0.130.0 or later** installed and on `$PATH` (`codex --version` must report `≥ 0.130.0`).
 - `tar`, `curl` (or `wget`), and `sha256sum` (or `shasum`) — used by the launcher to download and verify the `codex-dispatch` binary on first use.
 - Claude Code (the plugin runs as a Claude Code plugin).
-- Optional: [`bats-core`](https://github.com/bats-core/bats-core), `shellcheck`, and Go 1.22+ to run the test and lint suite locally.
+- Optional: [`bats-core`](https://github.com/bats-core/bats-core), `shellcheck`, and Go 1.25+ to run the test and lint suite locally.
 
 ## Installation
 
@@ -181,13 +181,13 @@ The broker auto-starts on first use and self-exits after 5 minutes of inactivity
 
 A detached (`--detach`) task is driven by a broker-owned background goroutine that is bound to the broker lifecycle: its context derives from the broker-lifetime context, so on broker shutdown or idle-out the broker **cancels and drains** in-flight detached runs (interrupting the turn and freeing the run slot) before tearing down the shared `codex app-server` child — a detached run is never orphaned or yanked mid-turn.
 
-Unlike a synchronous `/codex` run, a detached task does **not** write a `result.json` or compute a filtered `diff.patch`; its durable record is the streaming `stdout.log` plus the task table. Its observable contract is the `--status <id>` JSON returned by the broker's `task.status`:
+Unlike a synchronous `/codex` run, a detached task does **not** write a `result.json` or compute a filtered `diff.patch`; its durable records are the streaming `stdout.log` and versioned task-status files beside `broker.addr` under `tasks/`. Status survives broker restart and in-memory eviction. Previously queued/running tasks become `errored` with exit code `125` (outcome unknown) after restart; inspect the log before retrying. Its observable contract is the `--status <id>` JSON returned by the broker's `task.status`:
 
 | Field | When present | Meaning |
 |---|---|---|
 | `task_id` | always | broker task id |
 | `state` | always | `queued` \| `running` \| `done` \| `cancelled` \| `errored` |
-| `started_at` | always | RFC3339 (zero until the task starts running) |
+| `started_at` | once running | RFC3339 start time |
 | `event_count` | always | notifications streamed so far |
 | `fell_back_to_fresh` | always | a stale `resume` retried as a fresh thread |
 | `finished_at` | terminal states | RFC3339 completion time |
@@ -217,9 +217,9 @@ Packet execution rules:
 - Passes the packet's allowed files and disallowed changes into the Codex prompt as hard constraints.
 - Requires Codex to write the packet `.done.md` progress record, or stop with a clear failure if the packet cannot be completed within scope.
 - Audits tracked and untracked files against `Allowed files`, ignoring `.gitignore` matches plus low-risk untracked runtime/cache artifacts such as `.codex-dispatch/`, dependency folders, temp directories, caches, and bytecode. Broad build directories are policy-driven via `.gitignore` or `GRAPHRAG_SCOPE_AUDIT_IGNORE`.
-- For full-plan orchestration, `scripts/graphrag-plan-runner.py <plan> --out <dir> --jobs <N>` parses packet dependencies and runs unblocked packets. **The default is single-tree (`--isolation none`):** every packet dispatches directly in the current working tree on your feature branch, made safe by a deterministic, pre-flight allowed-file overlap partition plus per-file locks — no git worktrees are created. It verifies each accepted packet, writes missing progress records itself, and writes `<dir>/ledger.json` for GraphRAG review/ingestion. Use `--context-mode full` only when packet `Inputs` must be embedded in the worker prompt; the default `targets` mode keeps prompts smaller. Use `--shared-broker` as a token/process-overhead optimization, not the default low-latency path.
-- For the opt-in worktree fallback, pass `--isolation worktree`. The runner then routes each packet through `scripts/graphrag-worktree-dispatch.sh`, which executes it in an isolated temporary git worktree, audits scope there, and fans in only allowed paths. Use this when a packet's verification needs a fully isolated tree; the single-tree overlap partition is otherwise sufficient for correct parallel dispatch.
-- `GRAPHRAG_DISPATCH_ATTEMPTS` controls packet retries under `--isolation worktree`. The default is `2`; failed underlying `result.json.exit_code` attempts are discarded and retried in a fresh worktree, and only a clean attempt is fanned in.
+- For full-plan orchestration, `scripts/graphrag-plan-runner.py <plan> --out <dir> --jobs <N>` parses dependencies and schedules packets. The default `--isolation none` dispatches in the current checkout. Dispatch, verification and independent scope audit are serialized across this runner's workers. The same acceptance decision controls completion records, ledger results and dependency release. `--no-verify` records an unverified failure, never a completed packet.
+- `--isolation worktree` dispatches in an isolated temporary Git worktree and preflights fan-in with backups and rollback. Runner verification still executes in the parent checkout, within the serialized region. Separate runner processes and external editors must coordinate their writes.
+- `GRAPHRAG_DISPATCH_ATTEMPTS` controls packet retries under `--isolation worktree`. The default is `2`; failed underlying `result.json.exit_code` attempts are retried in a fresh worktree, and only a clean attempt is fanned in.
 - Under `--isolation worktree`, the runner persists the selected attempt's `dispatch-result.json` and `dispatch-stdout.log` in the run directory so benchmarks can aggregate real worker metrics after temporary worktrees are removed.
 - Benchmark helpers under `tests/sdk/` can aggregate persistent dispatch metrics and repeat a benchmark command for pass-rate plus p50/p95 wall-time comparisons.
 - Reports the selected packet, changed files, verification command, progress record path, allowed-file audit, and next packet.
@@ -258,7 +258,7 @@ The main Claude agent can delegate to the `codex-dispatch` subagent autonomously
 
 ## Run artifacts
 
-Each **synchronous** invocation writes to `.codex-dispatch/runs/<timestamp>-<pid>/` (detached `--detach` runs write only `stdout.log` + the task table — see [Detached task contract](#detached-task-contract---status)):
+Each **synchronous** invocation writes to `.codex-dispatch/runs/<timestamp>-<pid>/` (detached `--detach` runs write `stdout.log` + durable task status — see [Detached task contract](#detached-task-contract---status)):
 
 | File | Contents |
 |---|---|

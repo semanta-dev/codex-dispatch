@@ -212,8 +212,14 @@ func ResolveBrokerEndpoint() (string, string, error) {
 // EnsureBrokerRunning pings the broker; if unreachable, spawns one via
 // os.Executable() and polls for its address file to become reachable.
 func EnsureBrokerRunning(addrPath, repoRoot string) error {
-	if addr, err := readBrokerAddr(addrPath); err == nil && pingBroker(addr) == nil {
-		return nil
+	if addr, err := readBrokerAddr(addrPath); err == nil {
+		err = pingBroker(addr)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, broker.ErrUnauthenticatedEndpoint) {
+			return err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(addrPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir broker dir: %w", err)

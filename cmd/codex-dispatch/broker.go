@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,6 +44,12 @@ func runBroker(_ []string, _ io.Reader, _ io.Writer, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	table := broker.NewTable(brokerCap(), brokerRingSize())
+	if err := table.EnablePersistence(filepath.Join(dir, "tasks")); err != nil {
+		cancel()
+		fmt.Fprintf(stderr, "codex-dispatch: broker task storage: %v\n", err)
+		return 1
+	}
+	defer table.ClosePersistence()
 	// Bind detached (task.start) goroutines to the broker lifetime: their
 	// contexts derive from the serve ctx (cancelled below on shutdown/idle-out)
 	// and the runner's WaitGroup lets us drain in-flight detached runs before
@@ -121,8 +128,20 @@ func runBroker(_ []string, _ io.Reader, _ io.Writer, stderr io.Writer) int {
 	srv.HandleFunc("task.list", wrap("task.list", broker.HandleTaskList(state)))
 	srv.HandleFunc("task.status", wrap("task.status", broker.HandleTaskStatus(state)))
 	srv.HandleFunc("task.cancel", wrap("task.cancel", broker.HandleTaskCancel(state)))
-	srv.HandleFunc("task.start", wrap("task.start", broker.HandleTaskStart(state)))
-	srv.HandleFunc("dispatch.run", wrap("dispatch.run", broker.HandleDispatchRun(state)))
+	policy := broker.ExecutionPolicy{Root: repoRoot}
+	for _, root := range filepath.SplitList(os.Getenv("CODEX_BROKER_RESULT_ROOTS")) {
+		if strings.TrimSpace(root) != "" {
+			policy.ResultRoots = append(policy.ResultRoots, root)
+		}
+	}
+	if root := os.Getenv("CODEX_RESULT_DIR"); root != "" {
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(repoRoot, root)
+		}
+		policy.ResultRoots = append(policy.ResultRoots, root)
+	}
+	srv.HandleFunc("task.start", wrap("task.start", policy.Wrap(broker.HandleTaskStart(state))))
+	srv.HandleFunc("dispatch.run", wrap("dispatch.run", policy.Wrap(broker.HandleDispatchRun(state))))
 	// shutdown is idempotent (sync.Once); deferring it guarantees the detached
 	// drain runs and the codex child is closed on every exit path.
 	defer shutdown()

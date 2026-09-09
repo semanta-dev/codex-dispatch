@@ -229,7 +229,8 @@ func TestClientHTTPSurfacesNullIDParseError(t *testing.T) {
 	defer srv.Close()
 
 	// Dial expects a host:port and builds http://<addr>/rpc; strip the scheme.
-	addr := strings.TrimPrefix(srv.URL, "http://")
+	record, _ := json.Marshal(endpointRecord{Version: 2, Address: strings.TrimPrefix(srv.URL, "http://"), Token: strings.Repeat("a", 64)})
+	addr := string(record)
 	client, err := Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -269,7 +270,8 @@ func TestClientHTTPDispatchRunSurfacesNullIDParseError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	addr := strings.TrimPrefix(srv.URL, "http://")
+	record, _ := json.Marshal(endpointRecord{Version: 2, Address: strings.TrimPrefix(srv.URL, "http://"), Token: strings.Repeat("a", 64)})
+	addr := string(record)
 	client, err := Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)

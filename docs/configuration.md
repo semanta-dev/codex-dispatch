@@ -1,5 +1,66 @@
 # Configuration reference
 
+## Broker authentication and upgrade
+
+The broker discovery file (`.codex-dispatch/broker.addr`, or the
+`CODEX_BROKER_ADDR_PATH` override) now contains a version-2 JSON record with the
+loopback address and a random bearer credential. Treat the entire file as a
+secret: do not paste it into logs, bug reports, or chat. Credentials rotate on
+every broker start. Unix creation uses mode 0600; Windows creation supplies a
+protected DACL granting access only to the current process user.
+
+Dispatch, detached-task commands, and hooks read this record through the same
+client. The broker requires authentication for every HTTP RPC, including ping,
+and rejects browser origins/fetch metadata, non-loopback Host values, and
+non-JSON bodies. Clients do not use HTTP proxies or follow redirects. Processes
+running as the same OS user remain inside the trust boundary.
+
+Older plain `host:port` discovery files are deliberately rejected. To upgrade,
+first finish or cancel outstanding work and stop the old broker process. Verify
+that it has stopped, remove its stale discovery file at the configured address
+path, and retry dispatch with the new binary. Do not delete another active
+broker's discovery file. There is no unauthenticated compatibility fallback.
+If using the diagnostic `CODEX_DISPATCH_BROKER_ADDR` override, its value must be
+the complete authenticated JSON record rather than a bare address.
+
+This authentication change does not enforce per-packet filesystem scope or
+make task completion trustworthy by itself. Those Plan A gates remain separate.
+
+Execution RPCs also validate the requested mode, nonempty prompt, resume session,
+and sandbox enum. CWD must resolve inside the broker repository or a currently
+registered Git worktree. The log must be `stdout.log` inside the result directory.
+The broker creates a fresh log through a confined directory handle rather than
+appending through an existing link. Relative `CODEX_RESULT_DIR` values are resolved
+against the dispatch caller's directory before submission.
+
+Result directories may be inside the repository, a registered worktree, or an
+external root configured with `CODEX_BROKER_RESULT_ROOTS` (absolute paths separated
+by the platform path-list separator, `:` on Unix and `;` on Windows). Roots must
+exist when used. The `CODEX_RESULT_DIR` inherited when the broker starts is also
+allowed. These settings are fixed for that broker lifetime: configure external
+roots before startup, or finish/cancel active work and restart the broker before
+using a different external result root. A warm broker does not silently expand
+its policy based on subsequent client environment changes.
+
+At most 64 tasks may be queued or running in one broker. Excess requests receive
+RPC error `-32008` before task allocation; retry after capacity becomes available.
+Up to 16 request-policy checks run concurrently, with additional requests rejected
+for retry. Task-start rechecks are separately bounded by active execution slots.
+`CODEX_BROKER_MAX_CONCURRENT` controls execution slots within the 64-task ceiling.
+
+These are broker operation limits, not filesystem isolation from hostile code
+running under the same OS account. Working directories passed to Codex remain
+path names; other same-user processes must not rename them during execution.
+Per-packet isolation and acceptance gates remain separate Plan A work.
+
+Fresh and resumed threads receive the requested CWD, sandbox, and model. The
+broker checks the app-server response for effective CWD/model/sandbox mode and
+`approvalPolicy=never` before starting the turn. A missing or mismatched setting
+fails dispatch rather than silently inheriting an old thread's policy. Only
+recognized missing-thread responses trigger fallback to a fresh thread; generic
+invalid-parameter errors remain failures. A Codex version that omits effective
+settings is incompatible with this checked execution route.
+
 Complete reference for the environment variables, exit codes, and commands that
 configure `codex-dispatch`. The README links here from its Quickstart,
 Environment variables, and Exit codes sections.
@@ -154,9 +215,9 @@ depends on uncommitted/gitignored state — itself a signal). Set
 | Run a whole multi-packet plan | `/graphrag-codex-run <plan> [--jobs N] [--isolation none\|worktree]` |
 
 `/graphrag-codex-run` defaults to `--isolation none`: every packet runs in the
-single working tree on the current branch, made safe by a pre-flight
-allowed-file overlap partition plus per-file locks. `--isolation worktree` is
-the opt-in fallback for packets whose verification needs a fully isolated tree.
+single working tree on the current branch. Dispatch through verification and
+independent scope audit is serialized. `--isolation worktree` isolates dispatch
+and adds recoverable fan-in; runner verification still uses the parent checkout.
 
 ## Troubleshooting
 
@@ -302,3 +363,72 @@ reject any subagent requesting worktree isolation; the `WorktreeCreate` hook is
 the catch-all backstop (any non-zero exit aborts creation). Normal and parallel
 subagent dispatch is unaffected — only worktree isolation is blocked, and
 subagents run in the shared working tree on the current branch.
+
+## Recoverable dispatch snapshots and fan-in
+
+New synchronous dispatches retain raw pre-run working-tree content in a local Git
+ref recorded by `baseline-snapshot.json`. Clean filters and line-ending conversion
+are bypassed. The original staging index is copied to `baseline-index` without
+changing the live index. Snapshots cover tracked and nonignored untracked regular
+files and symlinks, including executable bits; runtime/result directories are
+excluded. Special files and submodules fail capture explicitly. This is not an
+atomic snapshot against another process editing the same checkout.
+
+`diff.patch` is a binary-capable task delta from the pre-run working tree. It does
+not include earlier WIP as additions. Restoring a dirty file to HEAD or deleting
+an untracked input therefore remains visible. Missing/corrupt snapshot evidence
+fails the dispatch and invalidates the patch rather than reporting a no-op.
+Legacy standalone diff capture retains its compatibility path.
+
+For recovery, read the manifest's `ref` and inspect a file with
+`git show '<ref>:path/to/file'`; redirect to a separate recovery file before
+replacing anything. Preserve `baseline-index` alongside the run artifacts if
+staging recovery is needed. The local refs intentionally retain WIP objects;
+after confirming recovery is unnecessary, delete the specific ref with
+`git update-ref -d '<ref>'`. Do not push these private baseline refs.
+
+`clean-verify.sh` requires `diff.patch` and a full commit ID in
+`baseline-head.txt`, uses that recorded commit even if HEAD has moved, and fails
+if the task delta cannot apply independently of earlier WIP. An existing empty
+patch can verify the baseline; a missing patch cannot.
+
+Isolated GraphRAG fan-in requires Python 3. It preflights all destinations before
+writing, rejects pre-existing WIP and concurrent byte/type/mode changes, preserves
+symlinks, and retains originals/candidates in `fanin-recovery`. Ordinary apply
+failures trigger rollback. Failed worktrees survive cleanup and startup collection
+via `preserve-worktrees`; remove them explicitly after inspecting the run.
+A crash or hostile concurrent filesystem mutation can still require manual
+recovery from the retained plan and backups. Fan-in is not a multi-file atomic
+transaction or an isolation boundary against the same OS user.
+
+## Acceptance, releases, and durable task status
+
+The plan runner accepts a packet only when the wrapper succeeds, the result has
+an integer zero task exit code and valid changed paths matching observed dispatch
+edits, all observed dispatch/verification edits stay within allowed files, and
+verification succeeds. `--no-verify` records `skipped` and cannot write completion.
+Old `Status: done` text alone does not skip work; current acceptance evidence and
+matching file fingerprints are required. Scope failures remain visible and do
+not authorize automatic restoration of the shared checkout.
+
+Tagged releases now depend on the same reusable CI workflow as pull requests,
+including Go/race/lint, cross-build, shell, Bats and Python checks. This repository
+change has not been exercised by a hosted tag publication. The reviewer harness
+requires at least 80 percent matches per fixture (10 runs by default), fails
+incorrect or failed CLI invocations, and reports skipped execution as exit 77.
+Mock tests validate the harness, not real model review quality.
+
+Broker task status is stored under `tasks/` beside `broker.addr`; the archive
+omits prompt text and retains outcomes after memory eviction or restart. Existing
+queued/running records become explicit errored outcomes (exit 125, unknown model
+completion); they are never automatically replayed. Completed status includes
+session identity, exit code, timestamps and final event count. Event replay still
+requires `stdout.log` after restart. Task-list retention is bounded in memory;
+status lookup by task ID can read older archived records.
+
+Persistence failures stop new admission and pin the explicit failure in memory
+so eviction cannot resurrect stale running status. Repair storage and restart the
+broker before retrying. Status writes sync the file before atomic rename; this
+is process-crash recovery, not a guarantee against power loss on every filesystem.
+Archive cleanup is manual; remove records only after their outcomes are no longer
+needed. Corrupt archive records fail broker startup with a diagnostic.

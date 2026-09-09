@@ -253,7 +253,8 @@ func TestHookStopTimesOutOnHungBroker(t *testing.T) {
 			connMu.Unlock()
 		}
 	}()
-	t.Setenv("CODEX_DISPATCH_BROKER_ADDR", ln.Addr().String())
+	record, _ := json.Marshal(map[string]any{"version": 2, "address": ln.Addr().String(), "token": strings.Repeat("a", 64)})
+	t.Setenv("CODEX_DISPATCH_BROKER_ADDR", string(record))
 
 	in := strings.NewReader(`{"session_id":"s1","cwd":"/x","hook_event_name":"Stop"}`)
 	var stdout, stderr bytes.Buffer
@@ -263,6 +264,12 @@ func TestHookStopTimesOutOnHungBroker(t *testing.T) {
 
 	select {
 	case rc := <-done:
+		connMu.Lock()
+		accepted := len(conns)
+		connMu.Unlock()
+		if accepted == 0 {
+			t.Fatal("hook did not reach the authenticated HTTP transport")
+		}
 		if rc != 0 {
 			t.Fatalf("rc = %d, stderr = %s", rc, stderr.String())
 		}

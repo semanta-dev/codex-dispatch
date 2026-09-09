@@ -2,12 +2,56 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/semanta-dev/codex-dispatch/internal/broker"
 )
+
+func TestLegacyDiscoveryRequiresExplicitMigration(t *testing.T) {
+	repo := t.TempDir()
+	path := filepath.Join(repo, "broker.addr")
+	legacy := []byte("127.0.0.1:12345\n")
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureBrokerRunning(path, repo); !errors.Is(err, broker.ErrUnauthenticatedEndpoint) {
+		t.Fatalf("legacy accepted: %v", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != string(legacy) {
+		t.Fatal("legacy discovery removed without operator migration")
+	}
+	// Simulate the documented migration after stopping the old broker.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s := broker.NewServer("127.0.0.1:0")
+	s.SetAddrFile(path)
+	s.HandleFunc("broker.ping", func(context.Context, json.RawMessage) (any, error) { return map[string]string{"version": "test"}, nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("authenticated discovery missing")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := EnsureBrokerRunning(path, repo); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+}
 
 // TestFreshOutsideGitRepoReturnsError verifies the broker-socket resolution
 // step rejects a cwd that isn't under a git repository, before any subprocess

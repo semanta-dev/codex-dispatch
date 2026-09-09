@@ -29,32 +29,30 @@ type Stats struct {
 	LinesRemoved int      `json:"lines_removed"`
 }
 
-// CaptureBaseline records, before codex runs, which paths are already dirty or
-// untracked in the working tree (so they can be excluded from attribution) and
-// a content signature (blob hash) for each (so a later edit to an already-dirty
-// file is still attributed, while a no-op is not). It writes
-// baseline-pre-files.txt (NUL-delimited paths) and baseline-pre-hashes.txt
-// (NUL-delimited path,hash pairs) under resultDir.
-//
-// It is best-effort: git enumeration errors are swallowed (a missing baseline
-// just means nothing is pre-excluded); only a resultDir write failure returns
-// an error.
+// CaptureBaseline saves a recoverable pre-run working-tree snapshot in a local
+// Git ref and writes its manifest plus legacy attribution files to resultDir.
+// Any failure prevents dispatch because attribution would be unreliable.
 func CaptureBaseline(workdir, resultDir string) error {
 	if resultDir == "" {
 		return fmt.Errorf("resultDir required")
 	}
 	repoRoot, err := gitTopLevel(workdir)
 	if err != nil {
-		// Not a usable git repo; write empty baselines so the post-run reader
-		// has well-defined inputs.
-		_ = writeNULList(filepath.Join(resultDir, "baseline-pre-files.txt"), nil)
-		_ = writeNULPairs(filepath.Join(resultDir, "baseline-pre-hashes.txt"), nil, nil)
-		return nil
+		return err
 	}
-	resultRel, _ := relIfUnder(repoRoot, resultDir)
+	resultRel, err := relIfUnder(repoRoot, resultDir)
+	if err != nil {
+		return err
+	}
 
-	tracked, _ := listChangedNames(repoRoot, "", "HEAD", resultRel)
-	untracked, _ := listUntracked(repoRoot, "", resultRel)
+	tracked, err := listChangedNames(repoRoot, "", "HEAD", resultRel)
+	if err != nil {
+		return err
+	}
+	untracked, err := listUntracked(repoRoot, "", resultRel)
+	if err != nil {
+		return err
+	}
 	pre := dedup(append(tracked, untracked...))
 
 	hashes := make(map[string]string, len(pre))
@@ -67,7 +65,10 @@ func CaptureBaseline(workdir, resultDir string) error {
 	if err := writeNULList(filepath.Join(resultDir, "baseline-pre-files.txt"), pre); err != nil {
 		return err
 	}
-	return writeNULPairs(filepath.Join(resultDir, "baseline-pre-hashes.txt"), pre, hashes)
+	if err := writeNULPairs(filepath.Join(resultDir, "baseline-pre-hashes.txt"), pre, hashes); err != nil {
+		return err
+	}
+	return saveSnapshot(repoRoot, resultDir)
 }
 
 // Capture runs against the current working directory. CaptureInDir is the
@@ -82,7 +83,16 @@ func Capture(baselineHead, resultDir string) (Stats, error) {
 
 // CaptureInDir takes the repo's working directory as an explicit argument so
 // tests don't need to chdir.
+// CaptureTaskInDir requires the recoverable baseline created by CaptureBaseline.
+func CaptureTaskInDir(workdir, baselineHead, resultDir string) (Stats, error) {
+	return captureInDir(workdir, baselineHead, resultDir, true)
+}
+
 func CaptureInDir(workdir, baselineHead, resultDir string) (Stats, error) {
+	return captureInDir(workdir, baselineHead, resultDir, false)
+}
+
+func captureInDir(workdir, baselineHead, resultDir string, requireSnapshot bool) (Stats, error) {
 	if baselineHead == "" {
 		return Stats{}, fmt.Errorf("baselineHead required")
 	}
@@ -92,6 +102,15 @@ func CaptureInDir(workdir, baselineHead, resultDir string) (Stats, error) {
 
 	repoRoot, err := gitTopLevel(workdir)
 	if err != nil {
+		return Stats{}, err
+	}
+	if raw, err := os.ReadFile(filepath.Join(resultDir, "baseline-snapshot.json")); err == nil {
+		var s snapshot
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return Stats{}, fmt.Errorf("invalid baseline snapshot: %w", err)
+		}
+		return captureSnapshot(repoRoot, baselineHead, resultDir, s)
+	} else if requireSnapshot || !os.IsNotExist(err) {
 		return Stats{}, err
 	}
 
@@ -385,11 +404,12 @@ func listChangedNames(repoRoot, indexFile, baseline, resultRel string) ([]string
 	return files, nil
 }
 
-func writeDiffPatch(repoRoot, indexFile, baseline string, files []string, path string) error {
+func writeDiffPatch(repoRoot, indexFile, baseline string, files []string, path string, after ...string) error {
 	if len(files) == 0 {
 		return os.WriteFile(path, nil, 0o644)
 	}
-	args := append([]string{"diff", baseline, "--"}, files...)
+	args := append([]string{"--literal-pathspecs", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", baseline}, after...)
+	args = append(append(args, "--"), files...)
 	out, err := runGitIndex(repoRoot, indexFile, args...)
 	if err != nil {
 		return err
@@ -397,11 +417,12 @@ func writeDiffPatch(repoRoot, indexFile, baseline string, files []string, path s
 	return os.WriteFile(path, []byte(out), 0o644)
 }
 
-func numstat(repoRoot, indexFile, baseline string, files []string) (int, int, error) {
+func numstat(repoRoot, indexFile, baseline string, files []string, after ...string) (int, int, error) {
 	if len(files) == 0 {
 		return 0, 0, nil
 	}
-	args := append([]string{"diff", baseline, "--numstat", "-z", "--"}, files...)
+	args := append([]string{"--literal-pathspecs", "diff", baseline}, after...)
+	args = append(append(args, "--no-renames", "--numstat", "-z", "--"), files...)
 	out, err := runGitIndex(repoRoot, indexFile, args...)
 	if err != nil {
 		return 0, 0, err

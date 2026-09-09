@@ -8,17 +8,11 @@ packets never share a wave), execute each packet, and write a crash-durable,
 machine-readable execution ledger for review, ingestion, and benchmarking.
 
 Isolation modes (`--isolation`):
-  none (default): dispatch each packet directly via scripts/dispatch-codex.sh in
-    the parent working tree; no git worktrees are created. The overlap partition
-    keeps co-writing packets out of the same wave, and a per-file lock registry
-    (FileLockRegistry) serializes only packets that claim a shared file, so
-    disjoint packets within a wave dispatch and verify in parallel up to
-    `--jobs N`. A verification command that reads files a packet does not claim
-    (e.g. `go build ./...`) can still see a concurrent peer's in-flight edits to
-    those unclaimed files; use `--jobs 1` or `--isolation worktree` when a
-    packet's verification needs a fully quiescent tree.
-  worktree: route each packet through scripts/graphrag-worktree-dispatch.sh for
-    git-worktree isolation (the opt-in fallback).
+  none (default): dispatch in the parent working tree.
+  worktree: dispatch in an isolated Git worktree, then fan in allowed files.
+Both modes serialize dispatch through verification and final scope audit because
+verification runs in the parent checkout. Separate runner processes and external
+editors must still coordinate; this mutex does not isolate the OS filesystem.
 """
 
 from __future__ import annotations
@@ -26,6 +20,8 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import hashlib
+import stat
 import os
 import pathlib
 import re
@@ -227,14 +223,92 @@ def require_packet_contract(packet: Packet) -> list[str]:
             errors.append(f"{packet.heading}: missing {section}")
     if packet.progress_record and packet.progress_record not in packet.allowed_files:
         errors.append(f"{packet.heading}: progress record is not listed in Allowed files")
+    for path in packet.allowed_files + packet.input_files:
+        if not safe_path(path):
+            errors.append(f"{packet.heading}: unsafe path {path!r}")
     return errors
 
 
+def safe_path(path: str) -> bool:
+    return isinstance(path, str) and bool(path) and not pathlib.PureWindowsPath(path).drive and "\\" not in path and not path.startswith("/") and all(
+        part not in ("", ".", "..", ".git", ".codex-dispatch") for part in path.split("/")
+    )
+
+
+def fingerprint(path: pathlib.Path) -> str | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        data = os.fsencode(os.readlink(path))
+    elif stat.S_ISREG(info.st_mode):
+        data = path.read_bytes()
+    else:
+        raise ValueError(f"cannot audit special file/submodule: {path}")
+    return hashlib.sha256(str(info.st_mode).encode() + b"\0" + data).hexdigest()
+
+
+def tree_state(repo: pathlib.Path, out: pathlib.Path) -> dict[str, str]:
+    paths = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=repo)
+    result = {}
+    for raw in paths.split(b"\0"):
+        if not raw:
+            continue
+        name = os.fsdecode(raw)
+        path = repo / name
+        if name.startswith(".codex-dispatch/") or path == out or out in path.parents:
+            continue
+        value = fingerprint(path)
+        if value is not None:
+            result[name] = value
+    return result
+
+
+def changed_paths(before: dict, after: dict) -> list[str]:
+    return sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+
+
+def evidence_path(repo: pathlib.Path, packet: Packet) -> pathlib.Path:
+    key = hashlib.sha256(packet.body.encode()).hexdigest()
+    return repo / ".codex-dispatch" / "accepted" / (key + ".json")
+
+
 def is_done(repo: pathlib.Path, packet: Packet) -> bool:
-    if not packet.progress_record:
+    try:
+        evidence = json.loads(evidence_path(repo, packet).read_text())
+        return (evidence.get("version") == 2 and evidence.get("accepted") is True
+                and evidence.get("verification_state") == "passed"
+                and "Status: done" in (repo / packet.progress_record).read_text().splitlines()
+                and evidence.get("files") == {p: fingerprint(repo / p) for p in packet.allowed_files + packet.input_files})
+    except (OSError, ValueError):
         return False
-    path = repo / packet.progress_record
-    return path.exists() and "Status: done" in path.read_text(errors="ignore")
+
+
+def evaluate_evidence(wrapper_rc: int, result: Any, changed: list[str],
+                      dispatch_changed: list[str], allowed: list[str], verification: Any) -> dict[str, Any]:
+    reason = ""
+    valid = (isinstance(result, dict) and type(result.get("exit_code")) is int
+             and result["exit_code"] == 0 and isinstance(result.get("files_changed"), list)
+             and all(safe_path(p) for p in result["files_changed"]))
+    observed = set(changed) | set(dispatch_changed)
+    scope_ok = not (observed - set(allowed))
+    verified = verification is not None and verification["exit_code"] == 0
+    if wrapper_rc != 0:
+        reason = "dispatch wrapper failed"
+    elif not valid:
+        reason = "missing, invalid, or failed dispatch result"
+    elif set(result["files_changed"]) != set(dispatch_changed):
+        reason = "dispatch result does not match observed edits"
+    elif not scope_ok:
+        reason = "out-of-scope edits: " + ", ".join(sorted(observed - set(allowed)))
+    elif not changed:
+        reason = "no repository edits observed"
+    elif not verified:
+        reason = "verification failed" if verification is not None else "verification skipped"
+    return {"accepted": not reason, "reason": reason,
+            "scope_state": "passed" if scope_ok else "failed",
+            "verification_state": "passed" if verified else ("failed" if verification is not None else "skipped")}
 
 
 def is_progress_path(path: str) -> bool:
@@ -345,6 +419,8 @@ def write_progress_record(
     if not packet.progress_record:
         return
     progress = repo / packet.progress_record
+    if not progress.resolve().is_relative_to(repo.resolve()):
+        raise ValueError("progress path escapes repository")
     progress.parent.mkdir(parents=True, exist_ok=True)
     changed = result_json.get("files_changed") or []
     # packet.heading is the captured markdown line ("## Packet 001: One"); strip
@@ -458,8 +534,10 @@ def dispatch_packet(
             try:
                 result_json = json.loads(result_path.read_text(errors="ignore"))
             except json.JSONDecodeError:
-                result_json = {}
+                result_json = {"artifact_error": "malformed result JSON"}
 
+    if not result_json:
+        result_json = {"artifact_error": "missing or empty result JSON"}
     return proc, stdout_text, stderr_text, run_dir, result_json, allowed_for_dispatch
 
 
@@ -468,28 +546,37 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
     stdout_path = pathlib.Path(args.out) / f"packet-{packet.number}.stdout"
     stderr_path = pathlib.Path(args.out) / f"packet-{packet.number}.stderr"
 
-    # In single-tree mode, hold a per-file lock on each implementation path this
-    # packet claims across its whole dispatch AND verification region, so a
-    # packet never writes/verifies against another packet's half-applied edits to
-    # a shared file. Because the overlap partition keeps co-writing packets out
-    # of the same wave, wave peers claim disjoint paths -> disjoint lock sets ->
-    # they dispatch in parallel (honoring --jobs N). In worktree mode each packet
-    # is isolated by its own worktree, so no locking is needed.
-    held: list[threading.Lock] = []
-    if args.isolation != "worktree":
-        held = SINGLE_TREE_LOCKS.acquire(overlap_paths(packet))
+    # Dispatch, parent fan-in, verification and audit share one checkout. Keep
+    # that entire region quiescent across this runner's workers in both modes.
+    held = SINGLE_TREE_LOCKS.acquire(["__parent_checkout__"])
     try:
+        evidence_path(repo, packet).unlink(missing_ok=True)
+        before = tree_state(repo, pathlib.Path(args.out).resolve())
         proc, stdout_text, stderr_text, run_dir, result_json, allowed_for_dispatch = dispatch_packet(
             packet, args, repo, plugin_root
         )
-
+        dispatched = tree_state(repo, pathlib.Path(args.out).resolve())
         verification = None
-        if proc.returncode == 0 and packet.verification and not args.no_verify:
+        if (proc.returncode == 0 and isinstance(result_json, dict)
+                and type(result_json.get("exit_code")) is int and result_json["exit_code"] == 0
+                and packet.verification and not args.no_verify):
             verification = run_shell(packet.verification, repo)
-
-        verification_ok = verification is None or verification["exit_code"] == 0
-        if proc.returncode == 0 and verification_ok and args.write_progress:
+        after = tree_state(repo, pathlib.Path(args.out).resolve())
+        evidence = evaluate_evidence(proc.returncode, result_json, changed_paths(before, after),
+                                     changed_paths(before, dispatched), allowed_for_dispatch, verification)
+        if evidence["accepted"] and args.write_progress:
             write_progress_record(repo, packet, result_json, verification, args.isolation)
+        progress = repo / packet.progress_record
+        progress_valid = bool(packet.progress_record) and progress.is_file() and "Status: done" in progress.read_text().splitlines()
+        if evidence["accepted"] and not progress_valid:
+            evidence.update(accepted=False, reason="missing or invalid completion record")
+        if evidence["accepted"]:
+            evidence.update(version=2, files={p: fingerprint(repo / p) for p in packet.allowed_files + packet.input_files})
+            target = evidence_path(repo, packet)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_suffix(".tmp")
+            temp.write_text(json.dumps(evidence))
+            os.replace(temp, target)
     finally:
         FileLockRegistry.release(held)
 
@@ -498,12 +585,9 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
         progress = repo / packet.progress_record
         if progress.exists():
             content = progress.read_text(errors="ignore")
-            progress_state = "done" if "Status: done" in content else "invalid"
+            progress_state = "done" if "Status: done" in content.splitlines() else "invalid"
 
-    passed = proc.returncode == 0
-    if verification is not None:
-        passed = passed and verification["exit_code"] == 0
-    passed = passed and progress_state == "done"
+    passed = evidence["accepted"] and progress_state == "done"
 
     return {
         "packet": packet.number,
@@ -517,11 +601,12 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
         "stdout_tail": stdout_text[-4000:],
         "stderr_tail": stderr_text[-4000:],
         "dispatch_result": result_json,
+        "evidence": evidence,
         "verification": verification,
         "progress_record": packet.progress_record,
         "progress_state": progress_state,
         "dispatch_allowed_files": allowed_for_dispatch,
-        "changed_files": result_json.get("files_changed", []),
+        "changed_files": result_json.get("files_changed", []) if isinstance(result_json, dict) else [],
     }
 
 
@@ -602,6 +687,8 @@ def run_plan(args: argparse.Namespace) -> int:
     repo = pathlib.Path(args.repo).resolve()
     plugin_root = pathlib.Path(__file__).resolve().parents[1]
     out = pathlib.Path(args.out).resolve()
+    if out == repo or out in repo.parents:
+        raise ValueError("runner output must not contain the repository")
     out.mkdir(parents=True, exist_ok=True)
     ledger_path = out / "ledger.json"
     if args.shared_broker and not args.shared_broker_addr:
@@ -616,6 +703,14 @@ def run_plan(args: argparse.Namespace) -> int:
         print(json.dumps(ledger, indent=2))
         return 2
     errors = [error for packet in packets for error in require_packet_contract(packet)]
+    for packet in packets:
+        for name in packet.allowed_files:
+            target = repo / name
+            if target.resolve() == out or out in target.resolve().parents:
+                errors.append(f"{packet.heading}: allowed path overlaps runner output: {name}")
+            if not target.resolve().is_relative_to(repo):
+                errors.append(f"{packet.heading}: allowed path escapes repository: {name}")
+
     if errors:
         ledger = {"status": "fail", "errors": errors, "packets": []}
         ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
@@ -744,23 +839,11 @@ def main() -> int:
         "--jobs",
         type=int,
         default=4,
-        help="max packets to dispatch concurrently per wave. In --isolation none, "
-        "packets that claim disjoint files run in parallel up to this many; "
-        "packets that share a claimed file are serialized by per-file locks "
-        "(see --isolation help)",
+        help="max scheduled packets per wave; parent mutation and verification are serialized",
     )
     parser.add_argument(
-        "--isolation",
-        choices=("none", "worktree"),
-        default="none",
-        help="none (default): dispatch each packet directly in the parent tree "
-        "(single-tree, no git worktrees). Co-writing packets are kept out of the "
-        "same wave by the overlap partition and serialized by per-file locks, so "
-        "disjoint packets dispatch/verify in parallel up to --jobs; a "
-        "verification that reads unclaimed files may still see a peer's in-flight "
-        "edits (use --jobs 1 or --isolation worktree for a quiescent tree). "
-        "worktree: route through graphrag-worktree-dispatch.sh for git-worktree "
-        "isolation",
+        "--isolation", choices=("none", "worktree"), default="none",
+        help="none: direct parent dispatch; worktree: isolated dispatch with fan-in. Both serialize parent verification.",
     )
     parser.add_argument(
         "--dispatch-command",

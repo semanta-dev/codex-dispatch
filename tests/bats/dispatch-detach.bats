@@ -154,3 +154,24 @@ _detach_wait_terminal() {
   # ...and unlike a synchronous dispatch it must NOT produce a result.json.
   [ ! -f "$TEST_REPO/detach-run/result.json" ]
 }
+
+@test "detached terminal status survives a broker process restart" {
+  export FAKE_APPSERVER_SESSION="thread-detach-restart"
+  task_id="$("$DISPATCH" --detach)"
+  _detach_wait_terminal "$task_id"
+  [ "$(echo "$output" | jq -r '.state')" = done ]
+  archive="$TEST_REPO/.codex-dispatch/tasks/$task_id.json"
+  [ -f "$archive" ]
+  broker_pid="$(cat "$TEST_REPO/.codex-dispatch/broker.pid")"
+  kill "$broker_pid"
+  for _ in $(seq 1 100); do
+    [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ] || break
+    sleep 0.05
+  done
+  [ ! -f "$TEST_REPO/.codex-dispatch/broker.pid" ]
+  run "$DISPATCH" --status "$task_id"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.state')" = done ]
+  [ "$(echo "$output" | jq -r '.session_id')" = thread-detach-restart ]
+  [ "$(echo "$output" | jq -r '.exit_code')" -eq 0 ]
+}

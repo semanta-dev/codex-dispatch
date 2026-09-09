@@ -16,9 +16,32 @@ import (
 	"github.com/semanta-dev/codex-dispatch/internal/broker"
 )
 
-// chdirTo changes the test process's cwd for the duration of the test. The
-// codex subprocess inherits cwd, so tests that exercise FAKE_APPSERVER_EDIT
-// should chdir into the temp repo to keep stray artifacts out of the source tree.
+// Relative paths retain the invocation directory across execution scoping.
+func TestRelativeResultDirectoryUsesInvocationDirectory(t *testing.T) {
+	repo := setupGitRepo(t)
+	chdirTo(t, repo)
+	dir, log, err := PrepareRunDir(Env{WorkDir: repo, ResultDir: "relative-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(repo, "relative-run") || log != filepath.Join(dir, "stdout.log") {
+		t.Fatalf("incorrect paths: %s %s", dir, log)
+	}
+	// The broker owns exclusive log creation; the client must not truncate a
+	// pre-existing artifact through a symlink or hard link before validation.
+	if err := os.WriteFile(log, []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := PrepareRunDir(Env{WorkDir: repo, ResultDir: "relative-run"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil || string(b) != "preserve" {
+		t.Fatalf("client truncated artifact: %q %v", b, err)
+	}
+}
+
+// chdirTo scopes working-directory changes to the lifetime of a test.
 func chdirTo(t *testing.T, dir string) {
 	t.Helper()
 	old, err := os.Getwd()
@@ -36,9 +59,6 @@ func chdirTo(t *testing.T, dir string) {
 // in internal/broker/handlers_dispatch_test.go.
 func installFakeAppserver(t *testing.T, env map[string]string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver unavailable on Windows")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -55,6 +75,9 @@ func installFakeAppserver(t *testing.T, env map[string]string) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	cmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -660,6 +683,9 @@ func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sub, "go.mod"), []byte("module x/server\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(sub, "server_hello.go"), []byte("seed-marker-before-autoscope"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	rec := filepath.Join(t.TempDir(), "cwd.txt")
 	installFakeAppserver(t, map[string]string{
 		"FAKE_CODEX_VERSION":        "0.130.0",
@@ -680,11 +706,48 @@ func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
 	if _, err := Run(env, io.Discard, io.Discard); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	assembled, err := os.ReadFile(filepath.Join(env.ResultDir, "prompt.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(assembled), "seed-marker-before-autoscope") {
+		t.Fatalf("seed content missing after auto-scope: %s", assembled)
+	}
 	got, err := os.ReadFile(rec)
 	if err != nil {
 		t.Fatalf("read recorded cwd: %v", err)
 	}
 	if string(got) != sub {
 		t.Fatalf("codex cwd = %q, want auto-derived module %q (scoping from CODEX_FILES failed)", got, sub)
+	}
+}
+
+func TestRunCaptureFailureIsExplicitAndInvalidatesPatch(t *testing.T) {
+	repo := setupGitRepo(t)
+	dir := filepath.Join(repo, "run")
+	installFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":     "0.130.0",
+		"FAKE_APPSERVER_SESSION": "s-corrupt-baseline",
+		"FAKE_APPSERVER_EDIT":    filepath.Join(dir, "baseline-snapshot.json") + ":{\n" + filepath.Join(dir, "diff.patch") + ":stale",
+	})
+	startInProcessBroker(t, repo)
+	chdirTo(t, repo)
+	rc, err := Run(Env{WorkDir: repo, Task: "t", Acceptance: "a", Sandbox: "workspace-write", ResultDir: dir}, io.Discard, io.Discard)
+	if rc != 1 || err == nil {
+		t.Fatalf("capture failure accepted: %d %v", rc, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r map[string]any
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r["exit_code"] != float64(1) || r["diff_path"] != "" || !strings.Contains(r["error_message"].(string), "capture-diff failed") {
+		t.Fatalf("misleading failure: %s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "diff.patch")); !os.IsNotExist(err) {
+		t.Fatalf("stale patch remains: %v", err)
 	}
 }

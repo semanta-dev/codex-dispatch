@@ -52,6 +52,7 @@ type Client struct {
 	conn     net.Conn
 	reader   *bufio.Reader
 	endpoint string
+	token    string
 	http     *http.Client
 
 	mu     sync.Mutex // serialises writes
@@ -63,21 +64,28 @@ func NewClientFromConn(conn net.Conn) *Client {
 	return &Client{conn: conn, reader: bufio.NewReaderSize(conn, 64*1024)}
 }
 
-// Dial connects to a localhost HTTP broker address such as "127.0.0.1:43123".
+// Dial consumes the authenticated JSON discovery record from broker.addr.
 func Dial(addr string) (*Client, error) {
-	if strings.TrimSpace(addr) == "" {
-		return nil, fmt.Errorf("broker address required")
+	e, err := parseEndpoint(addr)
+	if err != nil {
+		return nil, err
 	}
 	return &Client{
-		endpoint: "http://" + strings.TrimSpace(addr) + "/rpc",
+		endpoint: "http://" + e.Address + "/rpc",
+		token:    e.Token,
 		http: &http.Client{
-			Timeout: 0,
+			Timeout:       0,
+			Transport:     &http.Transport{Proxy: nil},
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}, nil
 }
 
 // Close shuts the underlying connection.
 func (c *Client) Close() error {
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
 	if c.conn != nil {
 		return c.conn.Close()
 	}
@@ -483,6 +491,7 @@ func (c *Client) post(ctx context.Context, raw []byte) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err

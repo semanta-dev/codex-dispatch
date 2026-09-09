@@ -73,6 +73,8 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		return 1, err
 	}
 
+	promptEnv := env // Input paths stay relative to the invocation directory.
+
 	// Monorepo auto-scoping: when the caller did not pin a working directory
 	// (WorkDir is still the repo root), derive the go.work/module subdir that
 	// owns the seeded files and run codex there. Files spanning multiple modules
@@ -116,7 +118,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	}
 
 	// --- prompt build ------------------------------------------------------
-	promptText, err := buildPromptForEnv(env, stderr)
+	promptText, err := buildPromptForEnv(promptEnv, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1, err
@@ -128,10 +130,6 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 
 	// --- codex invocation --------------------------------------------------
 	logPath := filepath.Join(resultDir, "stdout.log")
-	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
-		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
-		return 1, err
-	}
 	var (
 		run             codex.Run
 		fellBackToFresh bool
@@ -168,15 +166,19 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	// typed response instead.
 	sessionID := run.SessionID
 
-	// --- diff capture (warn on error, do not fail dispatch) ----------------
-	stats, err := diff.CaptureInDir(env.WorkDir, headSha, resultDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "codex-dispatch: warning: capture-diff failed: %v\n", err)
-		stats = diff.Stats{FilesChanged: []string{}}
-	}
-
+	// --- diff capture: missing evidence is a failure, never a no-op --------
+	stats, captureErr := diff.CaptureTaskInDir(env.WorkDir, headSha, resultDir)
 	exitCode := run.ExitCode
 	errorMessage := run.ErrorMessage
+	diffPath := filepath.Join(resultDir, "diff.patch")
+	if captureErr != nil {
+		exitCode = 1
+		errorMessage = fmt.Sprintf("capture-diff failed: %v", captureErr)
+		fmt.Fprintf(stderr, "codex-dispatch: %s\n", errorMessage)
+		_ = os.Remove(diffPath) // Never leave a partial or stale patch consumable.
+		diffPath = ""
+	}
+
 	if exitCode == 0 && len(stats.FilesChanged) == 0 {
 		exitCode = 4
 		errorMessage = "codex completed without meaningful repository edits"
@@ -190,7 +192,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		LinesAdded:              stats.LinesAdded,
 		LinesRemoved:            stats.LinesRemoved,
 		StdoutPath:              logPath,
-		DiffPath:                filepath.Join(resultDir, "diff.patch"),
+		DiffPath:                diffPath,
 		FellBackToFresh:         fellBackToFresh,
 		ErrorMessage:            errorMessage,
 		FilesChangedOutsideSeed: filesOutsideSeed(env.Files, stats.FilesChanged),
@@ -201,6 +203,9 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	}
 
 	fmt.Fprintln(stdout, resultDir)
+	if captureErr != nil {
+		return 1, fmt.Errorf("capture-diff failed: %w", captureErr)
+	}
 	return 0, nil
 }
 
@@ -238,6 +243,11 @@ func handleCanceled(ctx context.Context, runErr error, resultDir, logPath string
 
 func ensureResultDir(env Env, repoRoot string) (string, error) {
 	if env.ResultDir != "" {
+		var err error
+		env.ResultDir, err = filepath.Abs(env.ResultDir)
+		if err != nil {
+			return "", err
+		}
 		if err := os.MkdirAll(env.ResultDir, 0o755); err != nil {
 			return "", err
 		}
@@ -265,9 +275,6 @@ func PrepareRunDir(env Env) (resultDir, logPath string, err error) {
 		return "", "", err
 	}
 	logPath = filepath.Join(resultDir, "stdout.log")
-	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
-		return "", "", err
-	}
 	return resultDir, logPath, nil
 }
 
@@ -279,6 +286,9 @@ func buildPromptForEnv(env Env, stderr io.Writer) (string, error) {
 		Feedback:    env.Feedback,
 	}
 	convPath := env.ConventionsFile
+	if convPath != "" && !filepath.IsAbs(convPath) {
+		convPath = filepath.Join(env.WorkDir, convPath)
+	}
 	if convPath == "" {
 		convPath = prompt.DetectConventions(env.WorkDir)
 	}

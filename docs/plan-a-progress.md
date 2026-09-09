@@ -1,0 +1,145 @@
+# Plan A implementation progress
+
+Baseline: `b09902c2343e0d07d3006c94ab2cc960ccdbad2e`.
+Plan: [repository teardown](repo-teardown-2026-09-08.md).
+
+## 2026-09-09: authenticated broker transport
+
+Implemented the authentication portion of F01:
+
+- Atomic version-2 discovery with a fresh 256-bit bearer credential per broker.
+- Credential file created with Unix mode 0600 or a protected current-user-only
+  Windows DACL supplied at file creation, avoiding an inherited-permission window.
+- Loopback-only listening and numeric-loopback-only client destinations.
+- Authentication before body parsing or handler invocation; browser Origin and
+  fetch metadata, non-loopback Host, and unsupported Content-Type rejected.
+- Proxy-free HTTP transport; redirects rejected to prevent forwarding credentials.
+- All existing HTTP client routes consume authenticated discovery. Legacy records
+  fail closed with an explicit stop/remove-stale-discovery/retry procedure.
+- Regression coverage for unauthorized mutation, browser metadata, hostile Host,
+  listener binding, invalid discovery, credential rotation/permissions, redirects,
+  proxy configuration, migration, and an actually connected hung hook request.
+
+The CTO reviewed this bounded slice and identified the Windows creation-time
+ACL requirement and migration recovery gap; both are addressed in source.
+Windows native execution remains unverified on this Linux host.
+
+## 2026-09-09: execution destinations and admission
+
+Implemented production policy wrappers for synchronous and detached execution:
+registered-worktree/CWD validation, server-configured external result roots,
+mode/sandbox/resume validation, and confined creation of a newly owned log file.
+Destinations are rechecked after queueing and before the model turn. Existing log
+hard links are replaced without altering their target; symlink escapes are rejected.
+Relative result paths retain caller-directory semantics, and clients no longer
+truncate log files before broker validation. Go 1.25 is now the declared minimum
+for the confined filesystem APIs; workflow toolchain versions match.
+
+Admission is atomic at 64 queued/running tasks before ring-buffer allocation or
+background launch. A separate 16-check limit bounds request-time Git discovery.
+Tests cover parallel saturation/recovery, both execution routes, invalid requests
+before side effects, registered/unregistered worktrees, external results, symlink
+escapes, queued path replacement, hard links, and relative result paths.
+
+Residual boundary: CWD remains a path supplied to Codex; this is not an isolation
+mechanism against concurrent hostile filesystem mutation by the same OS user.
+The overall NO-GO remains until preservation and acceptance gates are implemented.
+
+## 2026-09-09: fresh/resumed thread settings
+
+Broker-created fresh, resumed, and fallback threads now receive the same CWD,
+sandbox, model, and noninteractive approval policy. Before starting a turn, the
+broker requires response evidence matching requested CWD/model/sandbox mode and
+approval policy. Missing or contradictory settings fail the dispatch. Protocol
+tests cover each mismatch on both fresh and resumed paths.
+Unexpected legacy approval requests now receive explicit denial instead of
+automatic consent, with a regression check that the request still receives a response.
+
+Invalid-parameter errors are no longer automatically classified as stale sessions.
+A real app-server probe observed `-32600: no rollout found for thread id ...` when
+resuming a newly created thread without a saved turn; that precise response now
+has stale-session regression coverage. The probe started no model turn and did
+not establish successful live resume interoperability. Live model-turn and native
+platform validation remain outstanding release gates.
+
+## 2026-09-09: preservation and replay checkpoint
+
+F05 now compares raw pre/post Git trees, retaining pre-run WIP under a dedicated
+local ref and copying the original index. Regression tests cover dirty-to-HEAD,
+untracked deletion, binary replay, literal pathspec names, symlinks, modes, lossy
+clean filters, missing/corrupt evidence, and unchanged live staging. Dispatch
+requires its snapshot and reports capture failure explicitly, with no usable
+patch advertised. Initial raw snapshotting invoked Git once per file; a measured performance
+regression prompted batching regular-file hashes while retaining raw bytes. Special files/submodules fail
+explicitly rather than silently losing their content.
+
+F06 preflights all destinations before writing, stages candidate/original copies,
+and rolls back ordinary apply failures. Failed outputs and recovery evidence
+survive cleanup and startup GC. CTO review caught clean-CRLF false positives and
+an interruption window; Git normalization now decides WIP separately from raw
+conflict fingerprints, and rollback records intent before mutations.
+
+F07 requires the patch and recorded full baseline commit, normalizes relative run
+paths, preserves apply diagnostics, and verifies at that commit after HEAD moves.
+F10 preserves caller-relative seed and convention paths during module auto-scope.
+
+Validation: all nine Go packages passed `go test -race ./...`; the subsequent
+capture-error regression passed dispatch race tests. Six clean-verify Bats cases,
+fan-in integration cases, and Python filesystem fault-injection tests passed.
+Vet and golangci-lint passed (0 issues). Native platform execution, live resumed
+model turns, large-repository snapshot cost, and crash-time recovery remain
+unverified. These are bounded preservation fixes, not overall release approval.
+
+## 2026-09-09: acceptance, release gates, and durable outcomes
+
+F03/F04 now use one acceptance decision for progress and ledger results. The
+runner requires strict successful task evidence matching independently observed
+raw dispatch edits, audits the union of dispatch and verification changes, and
+requires passing verification. It serializes each parent lifecycle in both
+isolation modes. Legacy done text cannot bypass execution; accepted evidence must
+match current file fingerprints and a valid completion record. Explicit skipped
+verification remains unverified. Scope violations are reported, not automatically
+reverted in the operator checkout.
+
+F08 routes tag publication through the reusable CI workflow, with publication
+permissions confined to the dependent release job. F09 enforces an 80 percent
+per-fixture reviewer threshold (default ten runs), rejects failed invocations,
+and distinguishes skipped execution (77) from success. Fake CLI tests exercise
+failure, count validation, empty selection, skip, and 8/10 versus 7/10 thresholds.
+
+F11 persists task status before admission/state-transition acknowledgements.
+Restarted unfinished tasks become explicit unknown-outcome errors without replay;
+completed outcomes survive memory eviction. CTO review caught readable stale
+archives after failed persistence: failed terminal states are now pinned and new
+admission stops until storage repair/restart. Regression tests cover that failure
+with real write-denying permissions, restart, eviction, event loss, and unsafe IDs.
+
+The fixed corpus and premeasurement promotion targets are in
+`docs/plan-a-benchmark.md`. No live benchmark result is claimed.
+
+## Remaining promotion work
+
+1. Final local integration passed: 131 Bats cases, eight Python tests, all nine
+   Go race packages, vet/lint, and Windows amd64/macOS arm64 cross-builds. The
+   added broker process-restart Bats case and persistence-failure race tests
+   also passed. CTO found no new blocker after the persistence-eviction fix.
+2. Exercise native Windows/macOS authentication, filesystem and restart behavior.
+3. Live Linux smoke passed on codex-cli 0.153.4: fresh and resumed turns
+   shared one session, returned task exit zero, and produced exact requested
+   hello/world contents without fallback. Evidence: `/tmp/plan-a-live-d9_ceete`.
+   Broader vendor/configuration coverage remains unverified.
+4. Run the fixed live benchmark/reviewer corpus, including snapshot overhead.
+5. Exercise the reusable workflow in hosted CI before any release publication.
+
+All original findings have implementation changes or explicit bounded contract
+changes. This does not constitute release approval: live/native/hosted gates are
+still partly unverified. Plan A (Repair) remains incomplete and the original NO-GO
+recommendation remains. No release, commit, push, or remote setting was changed.
+The goal tracker was observed paused; task tools cannot resume that state.
+
+Final performance screening found and corrected per-file process overhead:
+regular-file raw hashing now uses one Git batch with byte-safe C quoting.
+Single observations improved baseline-plus-capture from 10.287s to 0.377s at
+1,000 files and 103.110s to 2.080s at 10,000 files. See the benchmark protocol
+for measurement limits. Invalid-UTF-8 filesystem names were unsupported on this
+host; their quoting is unit-tested separately from supported-name replay tests.

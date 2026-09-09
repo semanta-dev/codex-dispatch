@@ -332,3 +332,50 @@ EOF
   # Reclaim must happen well under the 60s blocking window.
   [ "$(( end - start ))" -lt 30 ]
 }
+
+@test "late WIP conflict changes no earlier file and preserves rejected worktree" {
+  printf 'base a\n' > a.txt
+  printf 'base b\n' > b.txt
+  git add a.txt b.txt
+  git commit -qm files
+  printf 'operator WIP\n' > b.txt
+  export GRAPHRAG_DISPATCH_COMMAND="$FAKE_DISPATCH"
+  export GRAPHRAG_ALLOWED_FILES=$'a.txt\nb.txt'
+  export FAKE_WRITE_PATH=a.txt FAKE_EXTRA_PATH=b.txt
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [ "$(cat a.txt)" = 'base a' ]
+  [ "$(cat b.txt)" = 'operator WIP' ]
+  retained="$(find .codex-dispatch/graphrag-worktrees -name a.txt -print -quit)"
+  [ -n "$retained" ]
+  [ "$(cat "$retained")" = written ]
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [ -f "$retained" ]
+}
+
+@test "symlink ancestor cannot redirect fan-in outside parent" {
+  outside="$(mktemp -d)"
+  ln -s "$outside" redirected
+  export GRAPHRAG_DISPATCH_COMMAND="$FAKE_DISPATCH"
+  export GRAPHRAG_ALLOWED_FILES='redirected/new.txt'
+  export FAKE_WRITE_PATH='redirected/new.txt'
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [ ! -e "$outside/new.txt" ]
+  rmdir "$outside"
+}
+
+@test "clean CRLF checkout is not mistaken for parent WIP" {
+  git config core.autocrlf true
+  printf 'base\r\n' > file.txt
+  git add file.txt
+  git commit -qm crlf
+  [ -z "$(git status --porcelain -- file.txt)" ]
+  export GRAPHRAG_DISPATCH_COMMAND="$FAKE_DISPATCH"
+  export GRAPHRAG_ALLOWED_FILES='file.txt'
+  export FAKE_WRITE_PATH='file.txt'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat file.txt)" = written ]
+}

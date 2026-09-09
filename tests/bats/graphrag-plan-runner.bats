@@ -538,14 +538,9 @@ assert recs["001"]["status"] == "pass", recs["001"]
 PY
 }
 
-@test "disjoint single-tree packets dispatch in parallel (per-file lock, not a global mutex)" {
-  # Two packets claim disjoint files, so they ride the same wave AND must hold
-  # disjoint per-file lock sets -> they dispatch concurrently. Each dispatch
-  # marks itself in-flight with its own marker file, then waits for the peer's
-  # marker to appear; if both markers coexist the dispatches overlapped. A
-  # single global lock would serialize them and the wait would time out.
-  # Each packet uses a private run dir and result.json so the fixture itself
-  # never races on shared scratch state.
+@test "disjoint single-tree packets serialize dispatch through verification" {
+  # Even disjoint declared paths cannot attribute undeclared writes reliably.
+  # The complete parent dispatch/verify/audit lifecycle must be serialized.
   parallel_dispatch="$TMP_REPO/fake-parallel.sh"
   cat > "$parallel_dispatch" <<'EOF'
 #!/usr/bin/env bash
@@ -578,8 +573,8 @@ EOF
   [ "$status" -eq 0 ]
   [ -f docs/one.md ]
   [ -f docs/two.md ]
-  # The two disjoint packets were in-flight simultaneously: not globally serialized.
-  [ -f .codex-dispatch/overlap.flag ]
+  # No two dispatches may mutate the shared checkout simultaneously.
+  [ ! -f .codex-dispatch/overlap.flag ]
   python3 - <<'PY'
 import json
 ledger = json.load(open("par-out/ledger.json"))
@@ -700,4 +695,58 @@ assert plr.parse_dependencies("001, 2") == ["001", "002"], plr.parse_dependencie
 assert plr.parse_dependencies("07a") == ["07a"], plr.parse_dependencies("07a")
 assert plr.parse_dependencies("phase-b") == ["phase-b"], plr.parse_dependencies("phase-b")
 PY
+}
+
+@test "task failure missing and malformed results never create completion" {
+  bad_dispatch="$TMP_REPO/fake-bad.sh"
+  cat > "$bad_dispatch" <<'MOCK'
+#!/usr/bin/env bash
+mkdir -p .codex-dispatch/runs/bad
+if [ "$BAD_RESULT" != missing ]; then
+  printf '%s' "$BAD_RESULT" > .codex-dispatch/runs/bad/result.json
+fi
+printf '%s\n' "$PWD/.codex-dispatch/runs/bad"
+MOCK
+  chmod +x "$bad_dispatch"
+  for value in '{"exit_code":64,"files_changed":[]}' '{"exit_code":true,"files_changed":[]}' missing '[' 'null'; do
+    rm -f .codex-dispatch/runs/bad/result.json
+    export BAD_RESULT="$value"
+    run "$RUNNER" docs/graphrag/plans/demo.plan.md --out bad-out --dispatch-command "$bad_dispatch"
+    [ "$status" -ne 0 ]
+    [ ! -e docs/graphrag/progress/001-one.done.md ]
+    [ ! -e docs/graphrag/progress/002-two.done.md ]
+  done
+}
+
+@test "forged changed list cannot hide out-of-scope edits or dirty-to-HEAD restoration" {
+  bad_dispatch="$TMP_REPO/fake-scope.sh"
+  cat > "$bad_dispatch" <<'MOCK'
+#!/usr/bin/env bash
+mkdir -p .codex-dispatch/runs/bad
+printf 'root\n' > README.md
+printf '{"exit_code":0,"files_changed":[]}' > .codex-dispatch/runs/bad/result.json
+printf '%s\n' "$PWD/.codex-dispatch/runs/bad"
+MOCK
+  chmod +x "$bad_dispatch"
+  printf 'operator WIP\n' > README.md
+  run "$RUNNER" docs/graphrag/plans/demo.plan.md --out scope-out --dispatch-command "$bad_dispatch"
+  [ "$status" -ne 0 ]
+  [ ! -e docs/graphrag/progress/001-one.done.md ]
+  [[ "$output" == *"dispatch result does not match observed edits"* ]]
+}
+
+@test "no-verify cannot produce verified completion" {
+  run "$RUNNER" docs/graphrag/plans/demo.plan.md --out skip-out --no-verify --dispatch-command "$FAKE_DISPATCH"
+  [ "$status" -ne 0 ]
+  [ ! -e docs/graphrag/progress/001-one.done.md ]
+  [[ "$output" == *'"verification_state": "skipped"'* ]]
+}
+
+@test "legacy done text does not skip execution" {
+  mkdir -p docs/graphrag/progress
+  printf 'Status: done\n' > docs/graphrag/progress/001-one.done.md
+  run "$RUNNER" docs/graphrag/plans/demo.plan.md --out legacy-out --dispatch-command "$FAKE_DISPATCH"
+  [ "$status" -eq 0 ]
+  [ -f docs/one.md ]
+  [[ "$output" == *'"packets_run": 2'* ]]
 }

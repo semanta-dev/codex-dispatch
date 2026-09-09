@@ -69,6 +69,7 @@ git -C "$parent" worktree prune >/dev/null 2>&1 || true
 for stale in "$work_root"/*; do
   [ -d "$stale" ] || continue
   base_name="${stale##*/}"
+  [ -f "$run_root/${base_name%-a*}/preserve-worktrees" ] && continue
   case "$base_name" in
     *-a[0-9]*)
       owner_pid="${base_name%-a*}"
@@ -114,8 +115,6 @@ base_hash() {
 }
 
 declare -A allowed
-declare -A parent_allowed_hash
-declare -A parent_wip
 while IFS= read -r line; do
   line="${line#./}"
   [ -z "$line" ] && continue
@@ -126,21 +125,8 @@ while IFS= read -r line; do
       ;;
   esac
   allowed["$line"]=1
-  if [ -e "$parent/$line" ] || [ -L "$parent/$line" ]; then
-    parent_allowed_hash["$line"]="$(git -C "$parent" hash-object -- "$line")"
-  else
-    parent_allowed_hash["$line"]="__missing__"
-  fi
-  # A worktree edit is layered on the $base version, so if the parent's
-  # working-tree copy already diverges from $base it carries uncommitted WIP
-  # that a blind fan-in would silently overwrite. Record it now and refuse
-  # fan-in for such paths below.
-  parent_wip["$line"]=0
-  base_blob="$(base_hash "$line")"
-  if [ "${parent_allowed_hash[$line]}" != "${base_blob:-__missing__}" ]; then
-    parent_wip["$line"]=1
-  fi
 done < "$allowed_tmp"
+python3 "$script_dir/graphrag-fanin.py" capture "$parent" "$base" "$allowed_tmp" "$run_dir/parent-state.json"
 
 is_allowed_path() {
   local key="$1"
@@ -179,6 +165,12 @@ if [ -n "${CODEX_FILES:-}" ]; then
 fi
 
 cleanup() {
+  local exit_status="${1:-$?}"
+  if [ "$exit_status" -ne 0 ]; then
+    touch "$run_dir/preserve-worktrees"
+    printf 'graphrag-worktree-dispatch: preserved failed worktrees; recovery: %s\n' "$run_dir" >&2
+    return
+  fi
   if [ "${GRAPHRAG_WORKTREE_KEEP:-0}" != "1" ]; then
     for wt in "${worktrees[@]:-}"; do
       if [ -d "$wt" ]; then
@@ -377,39 +369,13 @@ if [ "$lock_acquired" -ne 1 ]; then
   printf '%s\n' "$run_dir"
   exit 1
 fi
-trap 'rm -rf "$lockdir" >/dev/null 2>&1 || true; cleanup' EXIT
+rc=0
+trap 'rc=$?; rm -rf "$lockdir" >/dev/null 2>&1 || true; cleanup "$rc"' EXIT
 
-while IFS= read -r -d '' status && IFS= read -r -d '' path; do
-  [ -z "$path" ] && continue
-  src="$worktree/$path"
-  dst="$parent/$path"
-  current_hash="__missing__"
-  if [ -e "$dst" ] || [ -L "$dst" ]; then
-    current_hash="$(git -C "$parent" hash-object -- "$path")"
-  fi
-  # Refuse fan-in if the parent path carried uncommitted WIP at startup: the
-  # worktree edited the $base version, so writing over the parent here would
-  # silently destroy those local changes. Ask the operator to commit/stash.
-  if [ "${parent_wip[$path]:-0}" = "1" ]; then
-    printf 'graphrag-worktree-dispatch: parent %s has uncommitted changes; commit or stash before an isolated worktree run\n' "$path" >&2
-    printf '%s\n' "$run_dir"
-    exit 1
-  fi
-  if [ "$current_hash" != "${parent_allowed_hash[$path]:-__missing__}" ]; then
-    printf 'graphrag-worktree-dispatch: fan-in conflict for %s\n' "$path" >&2
-    printf '%s\n' "$run_dir"
-    exit 1
-  fi
-  if [ "$status" = "DR" ]; then
-    # Rename source: delete the stale original from the parent.
-    rm -f "$dst"
-  elif [ -e "$src" ] || [ -L "$src" ]; then
-    mkdir -p "$(dirname "$dst")"
-    cp -p "$src" "$dst"
-  else
-    rm -f "$dst"
-  fi
-done < "$changed_status"
+if ! python3 "$script_dir/graphrag-fanin.py" apply "$parent" "$worktree" "$run_dir/parent-state.json" "$changed_status" "$run_dir/fanin-recovery"; then
+  printf '%s\n' "$run_dir"
+  exit 1
+fi
 
 rm -rf "$lockdir" >/dev/null 2>&1 || true
 trap cleanup EXIT

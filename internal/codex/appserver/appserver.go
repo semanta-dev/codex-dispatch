@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,14 +169,15 @@ func (t *TurnItem) UnmarshalJSON(b []byte) error {
 
 // ThreadStartOptions controls thread/start.
 type ThreadStartOptions struct {
+	VerifySettings        bool   // broker requires effective settings before starting a turn
 	CWD                   string // absolute path; passed through unchanged
 	Sandbox               string // "read-only" | "workspace-write" | "danger-full-access"
 	DeveloperInstructions string // optional; usually our assembled prompt's system block
 	Model                 string // optional; pins the codex model for the thread (from CODEX_MODEL). Empty = codex's configured default.
 }
 
-// ThreadResumeOptions controls thread/resume. Currently empty; reserved for future overrides.
-type ThreadResumeOptions struct{}
+// ThreadResumeOptions carries the same execution policy as a fresh thread.
+type ThreadResumeOptions = ThreadStartOptions
 
 // TurnStartOptions controls turn/start. Currently empty; the prompt is passed
 // separately and approvalPolicy is pinned to "never" inside StartTurn.
@@ -509,30 +511,21 @@ func (a *AppServer) handleInbound(line []byte) {
 
 // handleServerRequest answers a server→client request from codex.
 //
-// We always start threads/turns with approvalPolicy="never", so codex SHOULD
-// never block waiting on us for a command/patch approval. But the app-server
-// protocol still permits a handful of server-initiated requests (approval and
-// elicitation prompts), and a blanket -32601 "Method not found" is the wrong
-// answer for those: a codex build that does ask would treat the JSON-RPC error
-// as a failed approval (or, worse, wait/retry), which can wedge the turn. Since
-// our operating contract is non-interactive auto-approval, we reply to the
-// known approval/elicitation requests with a benign "approved"/"accepted"
-// result so codex proceeds without a human. Genuinely unknown request methods
-// still get -32601 (codex must tolerate that for methods it didn't truly
-// expect us to implement). Either way we ALWAYS send exactly one response so
-// codex never hangs awaiting one.
+// Threads and turns use approvalPolicy="never". If a legacy server nevertheless
+// asks for approval, answer explicitly with denial rather than invent consent or
+// leave it waiting. Unknown methods receive a protocol error.
 func (a *AppServer) handleServerRequest(id int64, method string, _ json.RawMessage) {
 	switch method {
 	case
 		// Command / patch approval prompts. With approvalPolicy=never these
-		// should not fire, but auto-approve defensively if they do.
+		// should not fire; deny if they do.
 		"applyPatchApproval",
 		"execCommandApproval",
 		"item/approvalRequest",
 		"turn/approvalRequest",
 		"approvalRequest":
-		// codex's ReviewDecision enum: "approved" lets the action proceed.
-		a.sendResult(id, map[string]any{"decision": "approved"})
+		// A legacy ReviewDecision denies the action without stalling the RPC.
+		a.sendResult(id, map[string]any{"decision": "denied"})
 	case
 		// Elicitation: codex asking the client for free-form input. We are
 		// non-interactive, so decline politely with an empty/declined result
@@ -1050,16 +1043,31 @@ func (a *AppServer) StartThread(ctx context.Context, opts ThreadStartOptions) (*
 	if err := json.Unmarshal(result, &resp); err != nil {
 		return nil, fmt.Errorf("thread/start response: %w", err)
 	}
+	if opts.VerifySettings {
+		if err := verifyThreadSettings(result, opts); err != nil {
+			return nil, err
+		}
+	}
 	return &resp.Thread, nil
 }
 
 // ResumeThread sends thread/resume. If codex reports the thread doesn't exist,
 // returns ErrStaleSession (wrapped) so the caller can fall back to fresh.
-func (a *AppServer) ResumeThread(ctx context.Context, threadID string, _ ThreadResumeOptions) (*Thread, error) {
+func (a *AppServer) ResumeThread(ctx context.Context, threadID string, opts ThreadResumeOptions) (*Thread, error) {
 	if !a.initialized.Load() {
 		return nil, ErrNotInitialized
 	}
-	params := map[string]any{"threadId": threadID}
+	sandbox, err := sandboxModeString(opts.Sandbox)
+	if err != nil {
+		return nil, err
+	}
+	params := map[string]any{"threadId": threadID, "sandbox": sandbox, "approvalPolicy": "never"}
+	if opts.CWD != "" {
+		params["cwd"] = opts.CWD
+	}
+	if opts.Model != "" {
+		params["model"] = opts.Model
+	}
 	result, err := a.call(ctx, "thread/resume", params)
 	if err != nil {
 		if isStaleError(err) {
@@ -1073,7 +1081,44 @@ func (a *AppServer) ResumeThread(ctx context.Context, threadID string, _ ThreadR
 	if err := json.Unmarshal(result, &resp); err != nil {
 		return nil, fmt.Errorf("thread/resume response: %w", err)
 	}
+	if opts.VerifySettings {
+		if err := verifyThreadSettings(result, opts); err != nil {
+			return nil, err
+		}
+	}
 	return &resp.Thread, nil
+}
+
+func verifyThreadSettings(raw json.RawMessage, opts ThreadStartOptions) error {
+	var got struct {
+		CWD            string `json:"cwd"`
+		Model          string `json:"model"`
+		ApprovalPolicy string `json:"approvalPolicy"`
+		Sandbox        struct {
+			Type string `json:"type"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		return fmt.Errorf("invalid effective thread settings: %w", err)
+	}
+	if got.ApprovalPolicy != "never" {
+		return fmt.Errorf("effective thread approval policy does not match never")
+	}
+	if opts.CWD != "" && (!filepath.IsAbs(got.CWD) || filepath.Clean(got.CWD) != filepath.Clean(opts.CWD)) {
+		return fmt.Errorf("effective thread cwd does not match requested directory")
+	}
+	if opts.Model != "" && got.Model != opts.Model {
+		return fmt.Errorf("effective thread model does not match requested model")
+	}
+	mode, err := sandboxModeString(opts.Sandbox)
+	if err != nil {
+		return err
+	}
+	want := map[string]string{"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}[mode]
+	if got.Sandbox.Type != want {
+		return fmt.Errorf("effective thread sandbox does not match requested mode")
+	}
+	return nil
 }
 
 // isStaleError inspects an error from call() and reports whether it
@@ -1088,11 +1133,15 @@ func isStaleError(err error) bool {
 	// Codes that codex *might* use for "no such thread". We'll lock this down
 	// once we observe real codex in the integration test (R10).
 	switch rerr.Code {
-	case -32004, -32602: // -32602 = "Invalid params", common when an id ref is unknown
+	case -32004:
 		return true
 	}
 	msg := strings.ToLower(rerr.Message)
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no such thread")
+	// Observed on codex-cli 0.153.4 for a thread without a saved rollout.
+	if rerr.Code == -32600 && strings.HasPrefix(msg, "no rollout found for thread id ") {
+		return true
+	}
+	return strings.Contains(msg, "thread not found") || strings.Contains(msg, "no such thread")
 }
 
 // StartTurn sends turn/start. Returns a TurnHandle whose Events stream is

@@ -91,9 +91,6 @@ func waitForLogContains(t *testing.T, path, substr string, timeout time.Duration
 
 func setupFakeAppserver(t *testing.T, env map[string]string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver unavailable on Windows")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -110,6 +107,9 @@ func setupFakeAppserver(t *testing.T, env map[string]string) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	cmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := cmd.CombinedOutput(); err != nil {

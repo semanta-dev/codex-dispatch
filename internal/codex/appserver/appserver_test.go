@@ -855,7 +855,7 @@ func TestStalledConsumerDoesNotBlockOtherTurn(t *testing.T) {
 }
 
 // TestServerRequestDoesNotHangCodex verifies a server→client request (approval /
-// elicitation) is answered with a benign result rather than a blanket -32601 that
+// elicitation) is answered with explicit denial rather than a blanket -32601 that
 // could wedge codex. We assert the client writes a JSON-RPC RESPONSE (id, no
 // method) carrying a result, not an error, for a known approval method.
 func TestServerRequestDoesNotHangCodex(t *testing.T) {
@@ -889,8 +889,8 @@ func TestServerRequestDoesNotHangCodex(t *testing.T) {
 				}
 				var got map[string]interface{}
 				_ = json.Unmarshal(resp.Result, &got)
-				if got["decision"] != "approved" {
-					t.Fatalf("approval decision = %v, want approved: %s", got["decision"], w)
+				if got["decision"] != "denied" {
+					t.Fatalf("approval decision = %v, want denied: %s", got["decision"], w)
 				}
 				return
 			}

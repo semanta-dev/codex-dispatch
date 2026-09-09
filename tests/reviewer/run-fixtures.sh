@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/reviewer/run-fixtures.sh — best-effort harness for codex-reviewer fixtures.
+# tests/reviewer/run-fixtures.sh, threshold-enforcing harness for codex-reviewer fixtures.
 #
 # For each tests/fixtures/reviewer/<name>/, build an input prompt from the
 # fixture files, invoke `claude` headlessly with the codex-reviewer body
@@ -8,11 +8,11 @@
 #
 # The agent's verdict is a model judgment and is inherently variable. The
 # fixture spec calls for >=80% match per fixture over 10 runs; this script
-# accepts a REVIEWER_FIXTURE_RUNS count (default 1) and reports pass/fail
-# tallies per fixture so a human can decide whether the rate is acceptable.
+# accepts a REVIEWER_FIXTURE_RUNS count (default 10) and enforces that threshold
+# independently for every selected fixture.
 #
 # Skip behavior: if `claude` is not on PATH or REVIEWER_FIXTURES_SKIP=1, the
-# script prints a clear skip message and exits 0. CI without a Claude API key
+# script prints a clear skip message and exits 77 (skipped, not passed). CI without a Claude API key
 # can rely on the skip path.
 #
 # Coverage note (inlined orchestrator reviewer path + exit_code==4):
@@ -42,7 +42,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 AGENT="$REPO_ROOT/agents/codex-reviewer.md"
 FIXTURES_DIR="$REPO_ROOT/tests/fixtures/reviewer"
 MODEL="${REVIEWER_MODEL:-claude-sonnet-4-6}"
-RUNS="${REVIEWER_FIXTURE_RUNS:-1}"
+RUNS="${REVIEWER_FIXTURE_RUNS:-10}"
 
 dry_run=0
 only_fixture=""
@@ -56,7 +56,7 @@ Usage: $0 [--dry-run] [--fixture <name>]
 
 Env:
   REVIEWER_MODEL          model id (default claude-sonnet-4-6)
-  REVIEWER_FIXTURE_RUNS   runs per fixture (default 1)
+  REVIEWER_FIXTURE_RUNS   runs per fixture (default 10)
   REVIEWER_FIXTURES_SKIP  if set, skip without running claude
 USAGE
       exit 0 ;;
@@ -64,6 +64,8 @@ USAGE
   esac
   shift
 done
+
+[[ "$RUNS" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$RUNS" -le 1000 ] || { err "run count must be between 1 and 1000"; exit 64; }
 
 if [ ! -f "$AGENT" ]; then
   err "agent file not found: $AGENT"
@@ -77,13 +79,24 @@ fi
 
 if [ -n "${REVIEWER_FIXTURES_SKIP:-}" ]; then
   err "REVIEWER_FIXTURES_SKIP is set; skipping reviewer fixture run."
-  exit 0
+  exit 77
 fi
 
 if [ "$dry_run" -eq 0 ] && ! command -v claude >/dev/null 2>&1; then
   err "claude CLI not on PATH; skipping reviewer fixture run."
   err "(set REVIEWER_FIXTURES_SKIP=1 to suppress this message in CI)"
-  exit 0
+  exit 77
+fi
+
+archive=""
+if [ "$dry_run" -eq 0 ]; then
+  archive="${REVIEWER_FIXTURE_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/reviewer-evaluation.XXXXXX")}"
+  mkdir -p "$archive"
+  archive="$(cd "$archive" && pwd -P)"
+  printf '%s\n' "$MODEL" > "$archive/model.txt"
+  printf '%s\n' "$RUNS" > "$archive/runs-per-fixture.txt"
+  cp "$AGENT" "$archive/reviewer.md"
+  err "evaluation evidence: $archive"
 fi
 
 agent_body="$(awk '/^---$/{c++; next} c>=2' "$AGENT")"
@@ -142,28 +155,36 @@ run_one_fixture() {
     return 0
   fi
 
-  local pass=0 fail=0 i output got_verdict got_reason
+  mkdir -p "$archive/$name"
+  printf '%s\n' "$prompt" > "$archive/$name/prompt.txt"
+  cp "$fix/expected_verdict.txt" "$archive/$name/expected_verdict.txt"
+  local pass=0 fail=0 i output got_verdict got_reason command_rc
   for ((i = 1; i <= RUNS; i++)); do
     # See pick-iterations.sh: --bare requires ANTHROPIC_API_KEY; OAuth users
     # need plain --print so the keychain is read.
     local bare_flag=""
     [ -n "${ANTHROPIC_API_KEY:-}" ] && bare_flag="--bare"
     # shellcheck disable=SC2086
+    command_rc=0
     output="$(claude $bare_flag --print --model "$MODEL" \
       --append-system-prompt "$agent_body" \
-      "$prompt" </dev/null 2>/dev/null || true)"
+      "$prompt" </dev/null 2>"$archive/$name/$i.stderr")" || command_rc=$?
+    printf '%s\n' "$output" > "$archive/$name/$i.response.txt"
+    printf '%s\n' "$command_rc" > "$archive/$name/$i.exit-code"
     got_verdict="$(parse_field VERDICT "$output")"
     got_reason="$(parse_field REASON "$output")"
-    if [ "$got_verdict" = "$expected_verdict" ] && [ "$got_reason" = "$expected_reason" ]; then
+    if [ "$command_rc" -eq 0 ] && [ "$got_verdict" = "$expected_verdict" ] && [ "$got_reason" = "$expected_reason" ]; then
       pass=$((pass + 1))
     else
       fail=$((fail + 1))
-      err "  [$name run $i] mismatch — got VERDICT=$got_verdict REASON=$got_reason"
+      err "  [$name run $i] mismatch, got VERDICT=$got_verdict REASON=$got_reason"
     fi
   done
 
   printf '%-26s  expected=%-13s/%-30s  pass=%d  fail=%d\n' \
     "$name" "$expected_verdict" "$expected_reason" "$pass" "$fail"
+  printf '%s\t%s\t%s\n' "$name" "$pass" "$fail" >> "$archive/results.tsv"
+  [ "$((pass * 100))" -ge "$((RUNS * 80))" ]
 }
 
 mapfile -t fixtures < <(find "$FIXTURES_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
@@ -173,13 +194,19 @@ if [ "${#fixtures[@]}" -eq 0 ]; then
   exit 1
 fi
 
+failed=0
+selected=0
 for fix in "${fixtures[@]}"; do
   if [ -n "$only_fixture" ] && [ "$(basename "$fix")" != "$only_fixture" ]; then
     continue
   fi
-  run_one_fixture "$fix"
+  selected=$((selected + 1))
+  run_one_fixture "$fix" || failed=1
 done
 
 if [ "$dry_run" -eq 0 ]; then
   err "fixture run complete (model judgment is variable; expect >=80% match per fixture over 10 runs)"
 fi
+
+[ "$selected" -gt 0 ] || { err "no matching fixture selected"; exit 64; }
+exit "$failed"
