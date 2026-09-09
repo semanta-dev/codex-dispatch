@@ -106,3 +106,43 @@ func TestCredentialDeniesSecondUnprivilegedPrincipal(t *testing.T) {
 		t.Fatalf("unprivileged credential read did not fail with permission denied: %v", err)
 	}
 }
+
+func makeTaskStoreReadOnly(t *testing.T, dir string) {
+	t.Helper()
+	original, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalACL, _, err := original.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readonly, err := windows.SecurityDescriptorFromString("D:P(A;;FRFX;;;" + user.User.Sid.String() + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := readonly.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, originalACL, nil)
+		runtime.KeepAlive(original)
+		if err != nil {
+			t.Error(err)
+		}
+	})
+	probe, err := os.CreateTemp(dir, "probe")
+	if err == nil {
+		probe.Close()
+		os.Remove(probe.Name())
+		t.Fatal("Windows DACL did not deny writes")
+	}
+}

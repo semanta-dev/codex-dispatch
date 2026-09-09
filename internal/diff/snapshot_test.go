@@ -99,7 +99,7 @@ func TestSnapshotDeltaBinaryModesAndLiteralPaths(t *testing.T) {
 		t.Fatalf("bad task delta: %s", patch)
 	}
 	// Reverse the task delta in place, including binary, mode and symlink edits.
-	if _, err := runGit(repo, "apply", "--reverse", filepath.Join(dir, "diff.patch")); err != nil {
+	if _, err := runGit(repo, "-c", "core.autocrlf=false", "apply", "--reverse", filepath.Join(dir, "diff.patch")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := snapshotTree(repo, dir)
@@ -230,7 +230,7 @@ func TestSnapshotBatchPreservesArbitraryPathBytes(t *testing.T) {
 	if len(stats.FilesChanged) != len(paths) {
 		t.Fatalf("paths lost: %q", stats.FilesChanged)
 	}
-	if _, err := runGit(repo, "apply", "--reverse", filepath.Join(dir, "diff.patch")); err != nil {
+	if _, err := runGit(repo, "-c", "core.autocrlf=false", "apply", "--reverse", filepath.Join(dir, "diff.patch")); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range paths {

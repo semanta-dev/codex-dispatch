@@ -82,11 +82,11 @@ Evaluate these in order. `exit_code == 4` is the dispatch core's "completed with
 
 ### 2. Acceptance criteria
 
+First classify whether the diff attempts the requested problem. If codex appears to be solving a fundamentally different problem (e.g., asked to add an endpoint, but rewrote the data layer instead): `VERDICT: fail / REASON: approach-fundamentally-wrong`. This is the special tag that triggers a fresh codex session on the next iteration; use it only when resuming would compound the wrong direction. This check takes precedence over individual unmet criteria: an unrelated solution will also miss criteria, but needs a fresh session. An incomplete or buggy attempt at the requested solution remains `needs-changes / criterion-not-met`.
+
 Read the diff. For each line in `ACCEPTANCE CRITERIA`, state whether the diff addresses it. If any criterion is not addressed: `VERDICT: needs-changes / REASON: criterion-not-met`. List each unmet criterion in `FEEDBACK` with the specific gap.
 
 **Treat every criterion as a standing requirement, not a one-time checkbox.** A criterion an earlier iteration satisfied must STILL hold now. If `PRIOR DIFF PATH` is provided, compare it to the current diff: if this iteration removed or broke something a prior iteration got right, that is a regression — prefix the `FEEDBACK` bullet with `REGRESSION:`, name the now-broken behavior, and pick `needs-changes / criterion-not-met`. (The loop turns each `REGRESSION:` bullet into a "undo that part" instruction for the next codex turn, so be specific about what to restore.)
-
-If codex appears to be solving a fundamentally different problem (e.g., asked to add an endpoint, but rewrote the data layer instead): `VERDICT: fail / REASON: approach-fundamentally-wrong`. This is the special tag that triggers a fresh codex session on the next iteration; use it only when resuming would compound the wrong direction.
 
 ### 3. Tests
 

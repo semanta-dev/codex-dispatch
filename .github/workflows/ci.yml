@@ -52,6 +52,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.12"
+      - name: install native shell test dependencies
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install bash
+            echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          fi
+          git clone --depth 1 --branch v1.12.0 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats-core"
+          echo "$RUNNER_TEMP/bats-core/bin" >> "$GITHUB_PATH"
       - name: provision unprivileged Windows ACL test principal
         if: runner.os == 'Windows'
         shell: pwsh
@@ -76,11 +85,23 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
           go build -o "codex-dispatch$suffix" ./cmd/codex-dispatch
           "./codex-dispatch$suffix" --version
+      - name: native shell and failure-injection gates
+        shell: bash
+        run: |
+          bash --version
+          suffix=""
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          export CODEX_DISPATCH_BIN="$PWD/codex-dispatch$suffix"
+          bats tests/bats/dispatch-codex.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > native-shell.tap
+          python3 -m unittest discover -s tests/python > native-python.txt 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-evidence-${{ matrix.os }}
-          path: native-tests.jsonl
+          path: |
+            native-tests.jsonl
+            native-shell.tap
+            native-python.txt
 
   shell:
     runs-on: ubuntu-latest

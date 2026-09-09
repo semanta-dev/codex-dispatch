@@ -466,6 +466,13 @@ def write_progress_record(
     progress.write_text("\n".join(lines))
 
 
+def script_command(path: str) -> list[str]:
+    # Native Python on Windows cannot directly execute POSIX shebang scripts.
+    if pathlib.Path(path).suffix == ".sh":
+        return ["bash", pathlib.Path(path).as_posix()]
+    return [path]
+
+
 def dispatch_packet(
     packet: Packet,
     args: argparse.Namespace,
@@ -494,7 +501,7 @@ def dispatch_packet(
         try:
             with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
                 proc = subprocess.run(
-                    [str(dispatch), "--allowed-file", allowed_path],
+                    [*script_command(str(dispatch)), "--allowed-file", allowed_path],
                     cwd=repo,
                     env=env,
                     text=True,
@@ -511,7 +518,7 @@ def dispatch_packet(
         dispatch_cmd = args.dispatch_command or str(plugin_root / "scripts" / "dispatch-codex.sh")
         with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
             proc = subprocess.run(
-                [dispatch_cmd],
+                script_command(dispatch_cmd),
                 cwd=repo,
                 env=env,
                 text=True,

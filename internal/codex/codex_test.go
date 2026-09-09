@@ -134,7 +134,8 @@ func TestThreadCWD(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := threadCWD(root, tc.workDir)
-			wantAbs, _ := filepath.Abs(tc.want)
+			wantAbs, _ := filepath.EvalSymlinks(tc.want)
+			got, _ = filepath.EvalSymlinks(got)
 			if got != wantAbs {
 				t.Fatalf("threadCWD(%q, %q) = %q, want %q", root, tc.workDir, got, wantAbs)
 			}
@@ -165,7 +166,11 @@ func TestResolveBrokerEndpointHonorsAddrPathOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repoRoot != canonicalTmp {
+	canonicalRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalRoot != canonicalTmp {
 		t.Fatalf("repoRoot = %q, want %q", repoRoot, tmp)
 	}
 	if !strings.HasSuffix(addrPath, filepath.Join("shared", "broker.addr")) {

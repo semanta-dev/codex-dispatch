@@ -133,16 +133,7 @@ func TestFailedPersistenceCannotResurrectStaleArchive(t *testing.T) {
 	if err := table.MarkRunning(id); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
-	probe, err := os.CreateTemp(dir, "probe")
-	if err == nil {
-		probe.Close()
-		os.Remove(probe.Name())
-		t.Skip("requires filesystem permissions to deny writes")
-	}
+	makeTaskStoreReadOnly(t, dir)
 	if err := table.MarkDone(id, 0, "session", false); err == nil {
 		t.Fatal("persistence failure not surfaced")
 	}

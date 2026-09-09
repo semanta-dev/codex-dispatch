@@ -69,7 +69,7 @@ All surfaces share a single Go dispatch core (the `codex-dispatch` binary, launc
 
 ## Prerequisites
 
-- A POSIX shell environment: Linux (x86_64/arm64), macOS (amd64/arm64), or Windows (amd64/arm64) via Git Bash / MSYS2.
+- Bash 4 or newer, Python 3 and Git. On macOS, install current Bash (`brew install bash`) and place its bin directory ahead of `/bin` in `PATH`; Apple's bundled Bash 3 is insufficient. Supported shell environments: Linux (x86_64/arm64), macOS (amd64/arm64), or Windows (amd64/arm64) via Git Bash / MSYS2.
 - `git` — the working directory must be a git repository.
 - [`codex`](https://github.com/openai/codex) CLI **version 0.130.0 or later** installed and on `$PATH` (`codex --version` must report `≥ 0.130.0`).
 - `tar`, `curl` (or `wget`), and `sha256sum` (or `shasum`) — used by the launcher to download and verify the `codex-dispatch` binary on first use.

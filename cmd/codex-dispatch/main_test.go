@@ -269,12 +269,13 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -303,7 +304,7 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 func TestDispatchListFlag(t *testing.T) {
 	// Smoke: --list with no broker reachable produces a clear error.
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 
 	dir := t.TempDir()
 	// not a git repo
@@ -469,12 +470,13 @@ func TestDetachFailedSetupLeavesNoOrphanDir(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -544,12 +546,13 @@ func TestDetachPreexistingResultDirPreserved(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -583,7 +586,7 @@ func TestBrokerSubcommandRoutes(t *testing.T) {
 		t.Skip("POSIX signal routing; native process shutdown is tested separately")
 	}
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
@@ -714,12 +717,13 @@ func TestDetachPromptParity(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}

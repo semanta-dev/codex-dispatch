@@ -72,14 +72,20 @@ cddx_detect_platform() {
 cddx_build_fake_appserver() {
   local out_dir="$1"
   local repo_root="$2"
+  local suffix=""
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) suffix=.exe ;; esac
   mkdir -p "$out_dir"
-  if [ ! -x "$out_dir/fake-appserver" ]; then
-    if ! ( cd "$repo_root/tests/fixtures/fake-appserver" && go build -o "$out_dir/fake-appserver" . ) >&2; then
+  if [ ! -x "$out_dir/fake-appserver$suffix" ]; then
+    if ! ( cd "$repo_root/tests/fixtures/fake-appserver" && go build -o "$out_dir/fake-appserver$suffix" . ) >&2; then
       printf 'cddx_build_fake_appserver: go build failed\n' >&2
       return 1
     fi
   fi
-  if [ ! -L "$out_dir/codex" ] && [ ! -x "$out_dir/codex" ]; then
-    ln -s "$out_dir/fake-appserver" "$out_dir/codex"
+  if [ ! -L "$out_dir/codex$suffix" ] && [ ! -x "$out_dir/codex$suffix" ]; then
+    if [ -n "$suffix" ]; then
+      cp "$out_dir/fake-appserver$suffix" "$out_dir/codex$suffix"
+    else
+      ln -s "$out_dir/fake-appserver$suffix" "$out_dir/codex$suffix"
+    fi
   fi
 }

@@ -129,14 +129,18 @@ You are a **strict read-only evaluator** during review. Do not modify the workin
 
 Run these checks in order. Stop at the first decisive failure (quality issues can be reported alongside other issues).
 
-**Check 1: Acceptance criteria.** Read `$RUN_DIR/diff.patch`. For each line in `ACCEPTANCE`, state whether the diff addresses it. If any criterion is unaddressed:
+**Check 1: Acceptance criteria.** First classify whether the diff attempts the requested problem.
+
+If codex appears to be solving a fundamentally different problem (e.g., asked for an endpoint, produced a data-layer rewrite):
+- `verdict = fail`, `reason = approach-fundamentally-wrong`
+
+This check takes precedence over individual unmet criteria: an unrelated solution needs a fresh session. An incomplete or buggy attempt at the requested solution remains `needs-changes / criterion-not-met`.
+
+Read `$RUN_DIR/diff.patch`. For each line in `ACCEPTANCE`, state whether the diff addresses it. If any criterion is unaddressed:
 - `verdict = needs-changes`, `reason = criterion-not-met`
 - Add each unmet criterion to feedback bullets
 
 Treat every criterion as a standing requirement: one a prior iteration satisfied must STILL hold. If a previous iteration's `RUN_DIR/diff.patch` is available, compare — if this iteration broke something earlier iterations got right, prefix that feedback bullet with `REGRESSION:` (name what to restore) and use `reason = criterion-not-met`.
-
-If codex appears to be solving a fundamentally different problem (e.g., asked for an endpoint, produced a data-layer rewrite):
-- `verdict = fail`, `reason = approach-fundamentally-wrong`
 
 **Check 2: Unit tests.** Skip if `TEST_POLICY = skip` or `TEST_CMD` is empty.
 
