@@ -10,8 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/semanta-dev/codex-dispatch/internal/broker"
 )
 
 func TestHookSessionStartContinuesAlways(t *testing.T) {
@@ -91,7 +89,7 @@ func fakeLineBroker(t *testing.T, handler func(string) (any, bool)) string {
 	token := strings.Repeat("a", 64)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
-			http.Error(w, "unauthorized", 401)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		var req struct {
