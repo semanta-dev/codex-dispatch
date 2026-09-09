@@ -392,10 +392,8 @@ Do not commit, branch, push, revert, stash, or mutate git history."""
 def run_shell(command: str, repo: pathlib.Path) -> dict[str, Any]:
     started = time.monotonic()
     proc = subprocess.run(
-        command,
+        ["bash", "-c", command],
         cwd=repo,
-        shell=True,
-        executable="/bin/bash",
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -536,6 +534,9 @@ def dispatch_packet(
 
     result_json: dict[str, Any] = {}
     if run_dir:
+        # Git Bash emits POSIX paths while native Python consumes drive paths.
+        if os.name == "nt" and run_dir.startswith("/"):
+            run_dir = subprocess.check_output(["cygpath", "-w", run_dir], text=True).strip()
         result_path = pathlib.Path(run_dir) / result_name
         if result_path.exists():
             try:

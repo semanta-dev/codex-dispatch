@@ -139,6 +139,7 @@ teardown() {
 @test "handles porcelain-quoted paths with spaces and backslashes" {
   mkdir -p "src/space dir"
   path='src/space dir/app\name.py'
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) path='src/space dir/日本語.py' ;; esac
   printf 'print("ok")\n' > "$path"
 
   export GRAPHRAG_ALLOWED_FILES="$path"

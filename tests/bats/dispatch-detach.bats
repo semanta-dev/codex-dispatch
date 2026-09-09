@@ -33,7 +33,7 @@ setup() {
 teardown() {
   cd /
   if [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ]; then
-    kill "$(cat "$TEST_REPO/.codex-dispatch/broker.pid")" 2>/dev/null || true
+    cddx_stop_process "$(cat "$TEST_REPO/.codex-dispatch/broker.pid")" 2>/dev/null || true
   fi
   rm -rf "$TEST_REPO" "$FAKE_BIN" 2>/dev/null || true
   export PATH="$ORIG_PATH"
@@ -163,12 +163,20 @@ _detach_wait_terminal() {
   archive="$TEST_REPO/.codex-dispatch/tasks/$task_id.json"
   [ -f "$archive" ]
   broker_pid="$(cat "$TEST_REPO/.codex-dispatch/broker.pid")"
-  kill "$broker_pid"
-  for _ in $(seq 1 100); do
-    [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ] || break
-    sleep 0.05
-  done
-  [ ! -f "$TEST_REPO/.codex-dispatch/broker.pid" ]
+  cddx_stop_process "$broker_pid"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Forced Windows shutdown leaves a stale PID; restart must recover it.
+      powershell.exe -NoProfile -Command "Wait-Process -Id $broker_pid -ErrorAction SilentlyContinue"
+      ;;
+    *)
+      for _ in $(seq 1 100); do
+        [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ] || break
+        sleep 0.05
+      done
+      [ ! -f "$TEST_REPO/.codex-dispatch/broker.pid" ]
+      ;;
+  esac
   run "$DISPATCH" --status "$task_id"
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.state')" = done ]

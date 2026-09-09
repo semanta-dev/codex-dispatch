@@ -56,7 +56,7 @@ teardown() {
   # throwaway TEST_REPO/.codex-dispatch/ — kill it cleanly so the next test
   # gets a fresh broker.
   if [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ]; then
-    kill "$(cat "$TEST_REPO/.codex-dispatch/broker.pid")" 2>/dev/null || true
+    cddx_stop_process "$(cat "$TEST_REPO/.codex-dispatch/broker.pid")" 2>/dev/null || true
   fi
   rm -rf "$TEST_REPO" "$FAKE_BIN" 2>/dev/null || true
   export PATH="$ORIG_PATH"
@@ -86,7 +86,7 @@ teardown() {
 }
 
 @test "exits 3 when codex binary missing from PATH" {
-  PATH="/usr/bin:/bin" run "$DISPATCH"
+  PATH="/usr/bin:/bin:/mingw64/bin:/clangarm64/bin" run "$DISPATCH"
   [ "$status" -eq 3 ]
   [[ "$output" == *"codex"* ]]
 }

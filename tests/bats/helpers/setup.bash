@@ -89,3 +89,13 @@ cddx_build_fake_appserver() {
     fi
   fi
 }
+
+# Git Bash kill expects an MSYS PID; the broker writes a native Windows PID.
+cddx_stop_process() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      powershell.exe -NoProfile -Command "Stop-Process -Id $1 -Force -ErrorAction Stop"
+      ;;
+    *) kill "$1" ;;
+  esac
+}

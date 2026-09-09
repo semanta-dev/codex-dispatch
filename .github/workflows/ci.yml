@@ -92,7 +92,8 @@ jobs:
           suffix=""
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
           export CODEX_DISPATCH_BIN="$PWD/codex-dispatch$suffix"
-          bats tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > native-shell.tap
+          export MSYS=winsymlinks:nativestrict
+          bats --print-output-on-failure tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > native-shell.tap
           python3 -m unittest discover -s tests/python > native-python.txt 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
