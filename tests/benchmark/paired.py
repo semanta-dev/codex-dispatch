@@ -24,7 +24,7 @@ os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 MODEL = "gpt-5.5"
 ROUTER = "claude-haiku-4-5-20251001"
-REVIEW_ROUTE = "structured-hook-command"
+REVIEW_ROUTE = "api-hook-command"
 CASES = {
     "C01": ("Create hello.txt containing exactly hello followed by a newline.", ["hello.txt"]),
     "C02": ("Append task followed by a newline to notes.txt. Preserve every existing byte.", ["notes.txt"]),
@@ -85,11 +85,18 @@ def oracle(case, repo):
     return errors
 
 
-def freeze(out, pricing_source):
+def freeze(out, pricing_source, review_pricing_source):
     out.mkdir(parents=True, exist_ok=False)
     shutil.copy2(__file__, out / "driver.py")
     shutil.copy2(Path(__file__).with_name("audit.py"), out / "audit.py")
     shutil.copy2(pricing_source, out / "official-pricing.md")
+    shutil.copy2(review_pricing_source, out / 'official-review-pricing.md')
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('api_review', ROOT / 'scripts/api-review.py')
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    (out / 'api-review-system.txt').write_text(api.system_prompt())
+    dump(out / 'api-review-schema.json', api.SCHEMA)
     entries = []
     for repetition in range(5):
         for index, case in enumerate(CASES):
@@ -137,13 +144,15 @@ def freeze(out, pricing_source):
     product_hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in git(ROOT, "ls-files", "-z").decode().split("\0") if name and (ROOT / name).is_file()}
     dump(out / "candidate-source-sha256.json", product_hashes)
     manifest = {"version": 1, "candidate": git(ROOT, "rev-parse", "HEAD").decode().strip(),
-                "model": MODEL, "reasoning": "medium", "router_model": ROUTER, "review_route": REVIEW_ROUTE, "router_thinking_tokens": 0, "structured_output_retries": 1, "review_system_sha256": hashlib.sha256((ROOT / "scripts/compact-review-system.md").read_bytes()).hexdigest(), "entrypoint": "scripts/codex-reviewed.py", "claude_tools": ["Skill", "Bash", "Read", "Grep", "Glob", "StructuredOutput"],
+                "model": MODEL, "reasoning": "medium", "router_model": ROUTER, "review_route": REVIEW_ROUTE, "router_thinking_tokens": 0, "structured_output_retries": 0, "review_system_sha256": hashlib.sha256((ROOT / "scripts/compact-review-system.md").read_bytes()).hexdigest(), "entrypoint": "scripts/codex-reviewed.py", "review_tools": ["review_result"], "review_endpoint": api.transport()[0],
                 "sandbox": "workspace-write", "approval": "never", "mcp": "none",
                 "max_attempts": 3, "timeout_seconds_per_trial": 600,
                 "retry_policy": "direct explicit resume with deterministic oracle feedback; plugin advertised inline review loop",
                 "pricing_basis": "published-rate-equivalent USD; CTO approved before measurement; not actual proxy billing",
                 "rates_per_million": {"input": 5, "cached_input": .5, "output": 30},
                 "pricing_source": "https://developers.openai.com/api/docs/pricing.md retrieved 2026-09-09",
+                'review_rates_per_million': {'input': 1, 'cached_input': .1, 'output': 5},
+                'review_pricing_source': 'https://platform.claude.com/docs/en/about-claude/pricing.md retrieved 2026-09-09',
                 "instrumentation": "before/after raw state outside product timing; actual verification/retries inside",
                 "codex_config_sha256": hashlib.sha256((Path(os.environ["CODEX_HOME"]) / "config.toml").read_bytes()).hexdigest(),
                 "versions": {x: subprocess.check_output([x, "--version"], text=True).strip() for x in ["codex", "claude", "git"]},
@@ -209,7 +218,7 @@ def execute(out, limit):
         try:
             for attempt in range(1, 4):
                 if entry["arm"] == "plugin":
-                    command = [sys.executable, str(ROOT / "scripts/codex-reviewed.py"), "--output-format", "stream-json", "--stdin-request"]
+                    command = [sys.executable, str(ROOT / "scripts/codex-reviewed.py"), "--output-format", "stream-json", "--stdin-request", "--review-transport", "api"]
                     prompt = (trial / "plugin-prompt.txt").read_text()
                 else:
                     command = ["codex", "exec", "--json", "-m", MODEL, "-c", 'approval_policy="never"']
@@ -279,6 +288,7 @@ def main():
     parser.add_argument("mode", choices=["freeze", "run", "oracle"])
     parser.add_argument("target")
     parser.add_argument("--pricing-source", type=Path, help="archived official pricing Markdown, required for freeze")
+    parser.add_argument('--review-pricing-source', type=Path, help='archived official Haiku pricing Markdown, required for API freeze')
     parser.add_argument("--limit", type=int, default=60, help="smoke-only partial execution; never promotion evidence")
     args = parser.parse_args()
     if not 1 <= args.limit <= 60:
@@ -292,7 +302,9 @@ def main():
     if args.mode == "freeze":
         if args.pricing_source is None or not args.pricing_source.is_file():
             parser.error("freeze requires an existing --pricing-source")
-        freeze(out, args.pricing_source)
+        if args.review_pricing_source is None or not args.review_pricing_source.is_file():
+            parser.error('freeze requires an existing --review-pricing-source')
+        freeze(out, args.pricing_source, args.review_pricing_source)
     else:
         execute(out, args.limit)
     return 0

@@ -196,6 +196,127 @@ def claude_evidence(trial, direct_route=False, compact=False, structured=False):
     return final, review_texts, cost if nonnegative(cost) else None, issues
 
 
+def api_usage_inventory(trial, model):
+    """Reconcile paid requests even when hook/report validation failed."""
+    cost, seen, issues = 0, set(), []
+    tokens = dict(inputTokens=0, outputTokens=0, cacheReadInputTokens=0, cacheCreationInputTokens=0, thinkingTokens=0)
+    folders = list((trial / 'repo/.codex-dispatch/expansions').glob('*/*.reviews/*'))
+    for folder in folders:
+        try:
+            response = read(folder / 'response.json')
+            if not response.get('id') or response['id'] in seen or response.get('model') != model:
+                raise ValueError('API message identity/model unpriced or duplicated')
+            seen.add(response['id'])
+            usage = response['usage']
+            pairs = [('input_tokens', 'inputTokens'), ('output_tokens', 'outputTokens'), ('cache_read_input_tokens', 'cacheReadInputTokens'), ('cache_creation_input_tokens', 'cacheCreationInputTokens')]
+            if any(type(usage.get(raw, 0 if raw.startswith('cache_') else None)) is not int or usage.get(raw, 0) < 0 for raw, _ in pairs):
+                raise ValueError('API usage missing or invalid')
+            cost += (usage['input_tokens'] + .1 * usage.get('cache_read_input_tokens', 0) + 5 * usage['output_tokens']) / 1e6
+            for raw, target in pairs:
+                tokens[target] += usage.get(raw, 0)
+            if usage.get('cache_creation_input_tokens', 0):
+                issues.append('API cache-write price unknown')
+        except Exception as error:
+            issues.append('API attempt usage unavailable: ' + str(error))
+    return cost, tokens, issues
+
+
+def api_evidence(trial, model):
+    stream = events(trial / 'attempt-1.stdout.jsonl')
+    parents = [e for e in stream if e.get('type') == 'result']
+    parent = parents[-1] if parents else {}
+    sid = parent.get('session_id', '')
+    if not re.fullmatch(r'[a-f0-9-]{36}', sid):
+        raise ValueError('API route parent session missing')
+    marker = 'Operation stopped by hook: Codex API review controller completed'
+    issues = []
+    if parent.get('subtype') != 'success' or parent.get('is_error') or parent.get('result') != marker or parent.get('modelUsage') != {} or any(parent.get(k) != 0 for k in ['duration_api_ms', 'num_turns', 'total_cost_usd']):
+        issues.append('zero-inference parent stop unproven')
+    if any(type(parent.get('usage', {}).get(key)) is not int or parent['usage'][key] != 0 for key in ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']):
+        issues.append('nonzero/unknown parent token usage')
+    if any(e.get('type') == 'assistant' for e in stream) or not any(e.get('prevent_continuation') is True and e.get('content') == marker and e.get('session_id') == sid for e in stream):
+        issues.append('hook stop boundary unproven')
+    validation = [e for e in stream if e.get('type') == 'codex_review_validation']
+    reports = [e for e in stream if e.get('type') == 'codex_api_review']
+    if validation != [{'type': 'codex_review_validation', 'valid': True}] or len(reports) != 1 or reports[0].get('session_id') != sid:
+        raise ValueError('validated API report missing')
+    report = reports[0]['report']
+    repo = (trial / 'repo').resolve()
+    receipts = [p for p in (repo / '.codex-dispatch/expansions' / sid).glob('*.json') if not p.name.endswith('.runs.json')]
+    if len(receipts) != 1:
+        raise ValueError('API receipt missing/ambiguous')
+    receipt, saved = receipts[0], read(receipts[0])
+    if saved['review_contract_sha256'] != read(trial.parent / 'candidate-source-sha256.json')['scripts/direct-review-contract.md']:
+        raise ValueError('API receipt contract differs from frozen source')
+    identity, payload = saved['identity'], saved['payload']
+    invocation = (trial / 'attempt-1.input.txt').read_text()
+    raw = invocation.removeprefix('/codex-dispatch:codex ')
+    hook = saved['hook_event']
+    if not invocation.startswith('/codex-dispatch:codex ') or saved['status'] != 'complete' or saved['review_transport'] != 'api' or saved['report'] != report or identity != payload['identity'] or identity['session_id'] != sid or identity['args_sha256'] != hashlib.sha256(raw.encode()).hexdigest() or Path(identity['repo']).resolve() != repo:
+        raise ValueError('API receipt/report invocation mismatch')
+    if hook['command_name'] != 'codex-dispatch:codex' or hook['command_source'] != 'plugin' or hook['expansion_type'] != 'slash_command' or hook['session_id'] != sid or hook['prompt_id'] != identity['prompt_id'] or hook['command_args'] != raw:
+        raise ValueError('actual slash hook route unproven')
+    sources = list((Path.home() / '.claude/projects').glob(f'*/{sid}.jsonl'))
+    if len(sources) != 1:
+        raise ValueError('parent persisted transcript missing/ambiguous')
+    archive = trial / 'claude-transcripts'
+    archive.mkdir(exist_ok=True)
+    (archive / sources[0].name).write_bytes(sources[0].read_bytes())
+    persisted = events(sources[0])
+    if any(e.get('type') == 'assistant' for e in persisted) or not any(e.get('type') == 'user' and e.get('promptId') == identity['prompt_id'] and e.get('message', {}).get('content') == marker for e in persisted):
+        issues.append('persisted hook stop prompt identity unproven')
+    command = read(trial / 'attempt-1.command.json')
+    if len(command) != 7 or not command[1].endswith('/scripts/codex-reviewed.py') or command[2:] != ['--output-format', 'stream-json', '--stdin-request', '--review-transport', 'api']:
+        issues.append('shipped API entrypoint unproven')
+    ledger = read(receipt.with_suffix('.runs.json'))
+    if ledger['identity'] != identity:
+        issues.append('API ledger identity changed')
+    review_root = receipt.parent / (receipt.stem + '.reviews')
+    directories = sorted(review_root.iterdir()) if review_root.exists() else []
+    expected_reviews = {str(i) for i, attempt in enumerate(ledger['attempts'], 1) if (lambda result: result['exit_code'] == 0 and bool(result['files_changed']))(read(Path(attempt['run_dir']) / 'result.json'))}
+    if {p.name for p in directories} != expected_reviews:
+        issues.append('API request/dispatch attempt counts differ')
+    cost, ids = 0, set()
+    tokens = dict(inputTokens=0, outputTokens=0, cacheReadInputTokens=0, cacheCreationInputTokens=0, thinkingTokens=0)
+    for folder in directories:
+        try:
+            started, request, response = read(folder / 'started.json'), read(folder / 'request.json'), read(folder / 'response.json')
+            attempt = ledger['attempts'][int(folder.name) - 1]
+            bundle = read(Path(attempt['run_dir']) / 'review-evidence.json')
+            env, config = saved['dispatch_env'], saved['config']
+            expected_payload = {'TASK': env['CODEX_TASK'], 'ACCEPTANCE': env['CODEX_ACCEPTANCE'], 'CONSTRAINTS': env['CODEX_CONSTRAINTS'], 'FILES': env['CODEX_FILES'], 'TEST_POLICY': env['REVIEW_TEST_POLICY'], 'TEST_CMD': env['REVIEW_TEST_CMD'], 'VERIFY_CMD': env['REVIEW_VERIFY_CMD'], 'CLEAN_VERIFY': config['clean_verify'], 'bundle': bundle, 'result': bundle['result'], 'previous_bundle': read(Path(ledger['attempts'][int(folder.name) - 2]['run_dir']) / 'review-evidence.json') if int(folder.name) > 1 else None}
+            if request['messages'] != [{'role': 'user', 'content': json.dumps(expected_payload)}] or request['system'] != (trial.parent / 'api-review-system.txt').read_text() or request['model'] != model or request['thinking'] != {'type': 'disabled'} or request['max_tokens'] != 1024 or request['tool_choice'] != {'type': 'tool', 'name': 'review_result', 'disable_parallel_tool_use': True}:
+                raise ValueError('API request does not match frozen profile/evidence')
+            if len(request['tools']) != 1 or request['tools'][0]['name'] != 'review_result' or request['tools'][0]['input_schema'] != read(trial.parent / 'api-review-schema.json'):
+                raise ValueError('API tool boundary changed')
+            if started['endpoint'] != read(trial.parent / 'manifest.json')['review_endpoint'] or started['request_sha256'] != hashlib.sha256((folder / 'request.json').read_bytes()).hexdigest():
+                raise ValueError('API transport/request identity changed')
+            usage = response['usage']
+            pairs = [('input_tokens', 'inputTokens'), ('output_tokens', 'outputTokens'), ('cache_read_input_tokens', 'cacheReadInputTokens'), ('cache_creation_input_tokens', 'cacheCreationInputTokens')]
+            if any(type(usage.get(raw, 0 if raw.startswith('cache_') else None)) is not int or usage.get(raw, 0) < 0 for raw, _ in pairs) or usage.get('cache_creation_input_tokens', 0):
+                raise ValueError('API usage unknown/invalid/unpriced')
+            if not response.get('id') or response['id'] in ids or response.get('model') != model:
+                raise ValueError('API message identity/model duplicate or missing')
+            ids.add(response['id'])
+            row_cost = (usage['input_tokens'] + .1 * usage.get('cache_read_input_tokens', 0) + 5 * usage['output_tokens']) / 1e6
+            cost += row_cost
+            for raw, target in pairs:
+                tokens[target] += usage.get(raw, 0)
+            content = response['content']
+            if response.get('type') != 'message' or response['stop_reason'] != 'tool_use' or len(content) != 1 or content[0].get('type') != 'tool_use' or content[0].get('name') != 'review_result':
+                raise ValueError('API did not return exactly one forced judgment')
+            judgment = content[0]['input']
+            if set(judgment) != {'verdict', 'reason', 'feedback'} or judgment != read(folder / 'decision.json') or read(folder / 'outcome.json')['state'] != 'complete':
+                raise ValueError('API decision incomplete/inconsistent')
+            if folder.name == str(report['iterations']) and (report['verdict'] != judgment['verdict'] or report['feedback'] != judgment['feedback'] or report['reason'] not in {judgment['reason'], 'exhausted-iterations', 'not-converging'}):
+                raise ValueError('controller report differs from model judgment')
+        except Exception as error:
+            issues.append('API review accounting/evidence: ' + str(error))
+    final = {**parent, 'structured_output': report, 'modelUsage': {model: {**tokens, 'costUSD': cost, 'costBasis': 'list'}}, 'terminal_reason': 'completed'}
+    reviews = [f"verdict: {report['verdict']}\nsession: {report['session_id']}\nrun: {report['run_dir']}"]
+    return final, reviews, cost, issues
+
+
 def accounting(trial, entry, inventory, module, rates):
     repo = trial / "repo"
     issues, policy_errors = list(inventory.errors), []
@@ -257,11 +378,18 @@ def accounting(trial, entry, inventory, module, rates):
     if entry["arm"] == "plugin":
         try:
             route = getattr(module, "REVIEW_ROUTE", "delegated")
-            final, reviews, claude_cost, extra = claude_evidence(trial, route in {"direct-command", "hook-command", "compact-hook-command", "structured-hook-command"}, route in {"compact-hook-command", "structured-hook-command"}, route == "structured-hook-command")
+            if route == "api-hook-command":
+                final, reviews, claude_cost, extra = api_evidence(trial, module.ROUTER)
+            else:
+                final, reviews, claude_cost, extra = claude_evidence(trial, route in {"direct-command", "hook-command", "compact-hook-command", "structured-hook-command"}, route in {"compact-hook-command", "structured-hook-command"}, route == "structured-hook-command")
             issues.extend(extra)
         except Exception as error:
             claude_cost = None
             issues.append("Claude accounting unavailable: " + str(error))
+        if getattr(module, 'REVIEW_ROUTE', '') == 'api-hook-command':
+            claude_cost, recovered_tokens, usage_issues = api_usage_inventory(trial, module.ROUTER)
+            issues.extend(usage_issues)
+            final['modelUsage'] = {module.ROUTER: {**recovered_tokens, 'costUSD': claude_cost, 'costBasis': 'list'}}
         tasks = [read(path)["task"] for path in (repo / ".codex-dispatch/tasks").glob("*.json")]
         if not tasks or len(tasks) != turn_count:
             issues.append("durable task / paid turn counts do not reconcile")
@@ -318,7 +446,7 @@ def audit_trial(out, entry, inventory, module, rates):
         if score.get("policy_errors"):
             violations.append("effective_policy_mismatch")
         if entry["arm"] == "plugin":
-            if getattr(module, "REVIEW_ROUTE", "delegated") in {"direct-command", "hook-command", "compact-hook-command", "structured-hook-command"}:
+            if getattr(module, "REVIEW_ROUTE", "delegated") in {"direct-command", "hook-command", "compact-hook-command", "structured-hook-command", "api-hook-command"}:
                 if final.get("subagent_stats", {}).get("spawned", 0) != 0:
                     failures.append("unexpected Claude delegation")
                 invocation = (trial / "attempt-1.input.txt").read_text()
@@ -331,7 +459,7 @@ def audit_trial(out, entry, inventory, module, rates):
             runs = sorted((repo / ".codex-dispatch/runs").glob("*/result.json"))
             if not 1 <= len(runs) <= 3:
                 raise ValueError("dispatch count outside retry budget")
-            if getattr(module, "REVIEW_ROUTE", "") == "structured-hook-command":
+            if getattr(module, "REVIEW_ROUTE", "") in {"structured-hook-command", "api-hook-command"}:
                 ledgers = list((repo / ".codex-dispatch/expansions").glob("*/*.runs.json"))
                 if len(ledgers) != 1:
                     raise ValueError("current invocation ledger missing/ambiguous")

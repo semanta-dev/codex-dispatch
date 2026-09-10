@@ -309,3 +309,26 @@ The public launcher now selects an ordinary root-object review or background
 schema using the hook's shared argument parser before launching Claude. Strict
 local report, receipt and retry-ledger validation is unchanged. A new two-trial
 transport smoke must establish real API acceptance before an all-six smoke.
+
+### API-controlled independent review candidate
+
+Excluded v9 confirmed that removing read tools only moved redundant reads into
+Bash: plugin 33.89 seconds versus direct 12.70. The CTO rejected further prompt
+adjustments and approved a deterministic controller with a single forced API
+judgment per Codex attempt, retaining the actual slash-command route and all
+promotion thresholds. The installed CLI's `continue:false` hook stop was tested
+with zero parent API calls; the API judgment receives the frozen rubric directly.
+This is not evidence that the parent received an expanded contract.
+
+The explicit `--review-transport api` candidate archives each API request and
+response, binds feedback/resume to the receipt ledger, rejects retries after a
+terminal decision, and validates zero parent inference before rendering success.
+A disposable HTTP worker enforces a wall deadline even for trickling responses;
+urllib's idle socket timeout alone failed the CTO's controlled probe. Unknown
+costs remain unknown; readable prior API spend survives failed reports.
+
+CI run 34425577612 passed all nine jobs at 2e20d0e, including Windows x64 and
+ARM, both macOS architectures, both Linux architectures, and snapshot/Bats.
+The setup-RPC shutdown cancellation race is covered by repeated focused tests.
+The new API candidate still requires its own complete validation and frozen
+native, reviewer-fixture and paired evidence before CTO promotion approval.

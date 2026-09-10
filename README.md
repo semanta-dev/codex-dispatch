@@ -400,7 +400,7 @@ python3 scripts/codex-reviewed.py --files src/hello.py --acceptance 'hello() ret
 
 This public entrypoint loads the real plugin command and hooks, pins Haiku 4.5,
 uses a short review-only system prompt, and sets `MAX_THINKING_TOKENS=0` only for
-its child Claude process. It enables only Skill/Bash/Read/Grep/Glob, uses
+its child Claude process. The CLI reviewer enables Bash for repairs, uses
 `dontAsk` tool permissions and excludes configured MCP servers and settings
 sources. It does not change persistent settings. Requires Claude Code with
 `UserPromptExpansion` support (validated on 2.1.266), Python 3, Git, Git Bash on
@@ -420,3 +420,34 @@ before reporting success. Formatting retries are limited to one. A rejected or
 invalid review exits nonzero. In stream-json mode, preserve the raw Claude
 events and require both exit zero and the final `codex_review_validation` event
 with `valid: true`; a vendor completion event alone is insufficient.
+
+For the API-controlled profile, add `--review-transport api`:
+
+```sh
+export ANTHROPIC_API_KEY=...  # Your Anthropic API key, supplied by your environment.
+python3 scripts/codex-reviewed.py --review-transport api --files src/hello.py --acceptance 'hello() returns Hello' 'Implement hello()'
+```
+
+This opt-in profile still invokes the real slash-command hook. Python owns the
+Codex dispatch/retry loop, and a separate Haiku Messages API request can return
+only one forced `review_result` decision. Haiku cannot read files, execute
+commands or edit code. Each request receives the complete evidence and the same
+review rubric; repairs carry the prior evidence and preserve the original task,
+acceptance, scope and verification parameters. The parent Claude session stops
+at the hook with zero inference. Local validation requires that stop event, the
+current receipt, the complete run ledger and the actual API decisions.
+
+`ANTHROPIC_BASE_URL` defaults to `https://api.anthropic.com`. An explicitly
+configured localhost proxy can run without a key; remote endpoints require
+HTTPS and an API key. No Claude OAuth credentials are extracted. Ambient HTTP
+proxies and redirects are disabled. The API request runs in a disposable worker
+with a wall-clock deadline; all dispatches and reviews share a 450-second hook
+budget. Unknown usage, malformed responses and timeouts fail closed, with raw
+attempt artifacts retained. There are no formatting retries. API request,
+response, usage and decision records live beside the invocation receipt in a
+`<prompt-id>.reviews/` directory; credentials are never written there.
+
+Plan A's current measurement candidate is this explicit API profile with the
+named localhost transport, Haiku 4.5, thinking disabled, and published-rate cost
+equivalents. The earlier CLI-profile smokes missed the economic thresholds.
+No profile has promotion approval until the full documented gates pass.

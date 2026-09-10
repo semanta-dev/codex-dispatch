@@ -137,6 +137,34 @@ def render(report):
         f"- run artifacts: {report['run_dir']}", *report['feedback']])
 
 
+def validate_api_result(final, prompt, events):
+    marker = 'Operation stopped by hook: Codex API review controller completed'
+    if final.get('subtype') != 'success' or final.get('is_error') or final.get('result') != marker:
+        raise ValueError('parent did not stop after API controller')
+    if any(final.get(key) != 0 for key in ['duration_api_ms', 'num_turns', 'total_cost_usd']) or final.get('modelUsage') != {}:
+        raise ValueError('unexpected parent inference in API profile')
+    if any(type(final.get('usage', {}).get(key)) is not int or final['usage'][key] != 0 for key in ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) or final.get('permission_denials') or final.get('subagent_stats', {}).get('spawned') != 0:
+        raise ValueError('unexpected parent usage or delegation')
+    if any(event.get('type') == 'assistant' for event in events) or not any(event.get('prevent_continuation') is True and event.get('content') == marker and event.get('session_id') == final.get('session_id') for event in events):
+        raise ValueError('API hook stop event unproven')
+    import uuid
+    sid = str(uuid.UUID(final['session_id']))
+    repo = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()).resolve()
+    receipts = [p for p in (repo / '.codex-dispatch/expansions' / sid).glob('*.json') if not p.name.endswith('.runs.json')]
+    if len(receipts) != 1:
+        raise ValueError('API controller receipt missing/ambiguous')
+    saved = json.loads(receipts[0].read_text())
+    if saved.get('review_transport') != 'api':
+        raise ValueError('current receipt is not API-reviewed')
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('api_review', ROOT / 'scripts/api-review.py')
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    api.validate_history(saved)
+    return validate_result({'subtype': 'success', 'terminal_reason': 'completed', 'session_id': sid,
+                            'structured_output': saved['report']}, prompt)
+
+
 def command(output_format, background=False):
     argv = ['claude', '--print', '--model', MODEL, '--plugin-dir', str(ROOT),
             '--system-prompt-file', str(ROOT / 'scripts/compact-review-system.md'),
@@ -156,6 +184,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('--output-format', choices=['text', 'json', 'stream-json'], default='text')
     parser.add_argument('--stdin-request', action='store_true', help='read one complete /codex-dispatch:codex invocation as data from stdin')
+    parser.add_argument('--review-transport', choices=['cli', 'api'], default='cli', help='api forces one read-only reviewer decision per Codex attempt')
     args, task_args = parser.parse_known_args()
     if args.stdin_request:
         if task_args:
@@ -174,16 +203,19 @@ def main():
         background = is_background(prompt.removeprefix('/codex-dispatch:codex '))
     except ValueError as error:
         parser.error(str(error))
-    proc = subprocess.Popen(command('stream-json', background), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=environment())
+    env = {**environment(), 'CODEX_REVIEW_TRANSPORT': args.review_transport}
+    proc = subprocess.Popen(command('stream-json', background), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
     proc.stdin.write(prompt)
     proc.stdin.close()
     final = {}
+    events = []
     try:
         for line in proc.stdout:
             if args.output_format == 'stream-json':
                 print(line, end='', flush=True)
             try:
                 event = json.loads(line)
+                events.append(event)
                 if event.get('type') == 'result':
                     final = event
             except ValueError:
@@ -191,13 +223,15 @@ def main():
         code = proc.wait()
         if code:
             raise ValueError(f'Claude exited {code}')
-        report = validate_result(final, prompt)
+        report = validate_api_result(final, prompt, events) if args.review_transport == 'api' else validate_result(final, prompt)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print('codex review failed: ' + str(error), file=sys.stderr)
         if args.output_format == 'stream-json':
             print(json.dumps({'type': 'codex_review_validation', 'valid': False, 'error': str(error)}))
         return 65
     if args.output_format == 'stream-json':
+        if args.review_transport == 'api':
+            print(json.dumps({'type': 'codex_api_review', 'session_id': final['session_id'], 'report': report}))
         print(json.dumps({'type': 'codex_review_validation', 'valid': True}))
     elif args.output_format == 'json':
         print(json.dumps(report))

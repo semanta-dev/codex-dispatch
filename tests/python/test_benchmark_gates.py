@@ -1,5 +1,6 @@
 import importlib.util
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -111,6 +112,21 @@ class BenchmarkGateTests(unittest.TestCase):
             inventory = AUDIT.codex_inventory(root)
             self.assertTrue(inventory.errors)
             self.assertFalse(inventory)
+
+    def test_failed_api_report_retains_known_spend_and_unknown_remainder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            reviews = root / 'repo/.codex-dispatch/expansions/session/prompt.reviews'
+            for n in [1, 2, 3]:
+                (reviews / str(n)).mkdir(parents=True)
+            for n in [1, 2]:
+                # Even a truncated/error decision has billable valid usage.
+                (reviews / str(n) / 'response.json').write_text(json.dumps({'id': f'msg{n}', 'model': 'haiku', 'stop_reason': 'max_tokens', 'usage': {'input_tokens': 100, 'output_tokens': 20}}))
+            cost, tokens, issues = AUDIT.api_usage_inventory(root, 'haiku')
+            self.assertAlmostEqual(cost, .0004)
+            self.assertEqual(tokens['inputTokens'], 200)
+            self.assertEqual(tokens['outputTokens'], 40)
+            self.assertEqual(len(issues), 1)
 
 
 if __name__ == "__main__":

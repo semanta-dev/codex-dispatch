@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,11 +81,15 @@ def environment(config, repo):
     return env
 
 
-def invoke(argv, env, cwd):
+def invoke(argv, env, cwd, deadline=None):
+    remaining = min(HELPER_DEADLINE, deadline - time.monotonic()) if deadline is not None else HELPER_DEADLINE
+    if remaining <= 10:
+        raise ValueError('command controller deadline exhausted')
+    env = {**env, 'CODEX_DISPATCH_TIMEOUT_MS': str(min(int(env.get('CODEX_DISPATCH_TIMEOUT_MS', '400000')), int((remaining - 10) * 1000)))}
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     proc = subprocess.Popen(argv, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
     try:
-        stdout, stderr = proc.communicate(timeout=HELPER_DEADLINE)
+        stdout, stderr = proc.communicate(timeout=remaining)
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
@@ -104,6 +109,7 @@ def write(path, record):
 
 
 def expand(event):
+    deadline = time.monotonic() + 450  # Reserve 30s for receipt/error and child cleanup.
     if event.get("command_name") != "codex-dispatch:codex":
         return {}
     if event.get("expansion_type") != "slash_command" or event.get("command_source") != "plugin":
@@ -121,7 +127,9 @@ def expand(event):
     env["REVIEW_RECEIPT_PATH"] = str(path)
     env["REVIEW_INVOCATION_ID"] = json.dumps(identity, sort_keys=True)
     dispatch_env = {k: env[k] for k in ["CODEX_TASK", "CODEX_ACCEPTANCE", "CODEX_FILES", "CODEX_WORKDIR", "CODEX_CONSTRAINTS", "REVIEW_TEST_POLICY", "REVIEW_TEST_CMD", "REVIEW_VERIFY_CMD", "REVIEW_CLEAN_VERIFY", "REVIEW_RECEIPT_PATH", "REVIEW_INVOCATION_ID"]}
-    header = {"identity": identity, "config": config, "dispatch_env": dispatch_env}
+    header = {"identity": identity, "config": config, "dispatch_env": dispatch_env,
+              'review_contract_sha256': hashlib.sha256((ROOT / 'direct-review-contract.md').read_bytes()).hexdigest(),
+              'hook_event': {key: event[key] for key in ['command_name', 'command_source', 'expansion_type', 'session_id', 'prompt_id', 'command_args', 'cwd']}}
     # Exclusive create precedes execution. A crash or concurrent duplicate stays
     # blocked; it cannot silently dispatch again under the same prompt identity.
     try:
@@ -133,18 +141,35 @@ def expand(event):
             raise ValueError("duplicate command is pending/failed or identity changed")
         return saved["output"]
     try:
+        api = None
+        if env.get('CODEX_REVIEW_TRANSPORT') == 'api':
+            spec = importlib.util.spec_from_file_location('api_review', ROOT / 'api-review.py')
+            api = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(api)
+            api.transport()  # Validate explicit transport before paid dispatch.
         background = ["--detach"] if config["detach"] else ["--list"] if config["list"] else ["--status", config["status"]] if config["status"] else ["--cancel", config["cancel"]] if config["cancel"] else []
         if background:
-            output = invoke([EVIDENCE.bash_executable(), (ROOT / "dispatch-codex.sh").as_posix(), *background], env, cwd)
+            output = invoke([EVIDENCE.bash_executable(), (ROOT / "dispatch-codex.sh").as_posix(), *background], env, cwd, deadline)
             payload = {"identity": identity, "kind": "background", "output": output}
         else:
-            bundle = json.loads(invoke([sys.executable, str(ROOT / "review-evidence.py")], env, cwd))
+            bundle = json.loads(invoke([sys.executable, str(ROOT / "review-evidence.py")], env, cwd, deadline))
             if bundle.get("complete") is not True or bundle.get("error"):
                 raise ValueError("incomplete dispatch evidence")
             payload = {"identity": identity, "kind": "review", "iteration": 1, "config": config,
                        "dispatch_env": dispatch_env,
                        "bundle": bundle, "run_dir": bundle["run_dir"], "codex_session": bundle["result"]["session_id"]}
         payload["receipt_path"] = str(path)
+        if api is not None:
+            if payload['kind'] == 'background':
+                report = {'kind': 'background', 'output': payload['output']}
+            else:
+                def repair(repair_env, repair_cwd):
+                    return json.loads(invoke([sys.executable, str(ROOT / 'review-evidence.py')], repair_env, repair_cwd, deadline))
+                report = api.control(payload, config, env, cwd, repair, deadline)
+            output = {'continue': False, 'stopReason': 'Codex API review controller completed'}
+            write(path, {**header, 'status': 'complete', 'payload': payload, 'output': output,
+                         'review_transport': 'api', 'report': report})
+            return output
         context = "CODEX_EXPANSION_RECEIPT\n" + json.dumps(payload) + "\nEND_CODEX_EXPANSION_RECEIPT"
         output = {"hookSpecificOutput": {"hookEventName": "UserPromptExpansion", "additionalContext": context}}
         write(path, {**header, "status": "complete", "payload": payload, "output": output})

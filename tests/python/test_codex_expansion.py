@@ -26,7 +26,7 @@ class ExpansionTests(unittest.TestCase):
 
     def test_untrusted_text_is_environment_data_not_shell_source(self):
         captured = []
-        def invoke(argv, env, cwd):
+        def invoke(argv, env, cwd, deadline=None):
             captured.append((argv, env, cwd))
             return json.dumps(self.bundle)
         with patch.object(HOOK, 'invoke', side_effect=invoke):

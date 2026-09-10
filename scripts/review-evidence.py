@@ -152,7 +152,8 @@ def collect_with_receipt():
             temp = ledger.with_suffix(".tmp")
             temp.write_text(json.dumps(data, indent=2) + "\n")
             os.replace(temp, ledger)
-        row = {"iteration": len(attempts) + 1, "state": "running", "resume_session": session}
+        row = {"iteration": len(attempts) + 1, "state": "running", "resume_session": session,
+               'feedback': os.environ.get('CODEX_FEEDBACK', '')}
         attempts.append(row)
         persist()  # Count the attempt before any dispatch or model work.
         try:
