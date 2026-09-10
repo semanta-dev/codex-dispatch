@@ -108,3 +108,19 @@ A skipped, missing, failed, or architecture-mismatched job is not native evidenc
 Do not replace the Windows source snapshot implementation with POSIX `dir_fd` or
 `O_NOFOLLOW` operations: production Windows materialization still needs native
 handle/reparse-point validation.
+
+## First native observation
+
+Candidate `d766ab3`, run [34439690985](https://github.com/semanta-dev/codex-dispatch/actions/runs/34439690985),
+executed on both Windows amd64 and arm64. AppContainer process creation
+succeeded, but token inspection failed before primary-thread resume while
+querying the LPAC field through the generic null-buffer sizing pattern. The
+probe correctly stayed NO-GO; no child controls ran and cleanup reported no
+errors. Fixed-size token fields now use direct DWORD queries and errors retain
+the information class and Win32 error. Where the LPAC enum query is unsupported,
+the probe checks the kernel-owned `WIN://NOALLAPPPKG` security attribute by exact
+name through `NtQuerySecurityAttributesToken`. This follows the established
+[System Informer implementation](https://github.com/winsiderss/systeminformer/blob/master/phlib/nativetoken.c),
+which itself marks the direct LPAC enum query as TODO. A missing attribute or
+unsupported query fails closed; requested creation flags are never evidence. This correction needs a fresh native run;
+it is not evidence that LPAC or Git Bash passed.

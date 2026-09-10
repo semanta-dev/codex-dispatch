@@ -10,6 +10,7 @@ on:
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -42,6 +43,7 @@ jobs:
           version: v2.8.0
 
   native:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +59,8 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update
-            sudo apt-get install -y bubblewrap
+            sudo apt-get install -y bubblewrap ripgrep
+            bash scripts/ci-configure-bwrap.sh | tee "$RUNNER_TEMP/bwrap-prerequisite.txt"
           fi
           if [ "$RUNNER_OS" = macOS ]; then
             brew install bash
@@ -112,9 +115,11 @@ jobs:
             native-shell.tap
             native-python.txt
             ${{ runner.temp }}/remediation-evidence/
+            ${{ runner.temp }}/bwrap-prerequisite.txt
 
   shell:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
@@ -126,6 +131,7 @@ jobs:
 
   snapshot-and-bats:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [go, shell, native]
     steps:
       - uses: actions/checkout@v4
@@ -150,7 +156,8 @@ jobs:
       - name: install bats
         run: |
           sudo apt-get update
-          sudo apt-get install -y bats bubblewrap
+          sudo apt-get install -y bats bubblewrap ripgrep
+          bash scripts/ci-configure-bwrap.sh
       - name: run bats against snapshot binary
         env:
           CODEX_DISPATCH_BIN: ${{ steps.bin.outputs.path }}

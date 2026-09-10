@@ -34,6 +34,7 @@ const (
 )
 
 var userenv = windows.NewLazySystemDLL("userenv.dll")
+var querySecurityAttributes = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQuerySecurityAttributesToken")
 var machineInfo = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsWow64Process2")
 var inJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
 
@@ -48,6 +49,7 @@ type identity struct {
 	NativeMachine   uint16 `json:"native_machine"`
 	AppContainer    uint32 `json:"app_container"`
 	LPAC            uint32 `json:"lpac"`
+	LPACSource      string `json:"lpac_source"`
 	CapabilityCount uint32 `json:"capability_count"`
 	SID             string `json:"sid"`
 	InJob           bool   `json:"in_job"`
@@ -93,9 +95,9 @@ type report struct {
 
 func tokenInfo(token windows.Token, class uint32) ([]byte, error) {
 	var n uint32
-	_ = windows.GetTokenInformation(token, class, nil, 0, &n)
+	queryErr := windows.GetTokenInformation(token, class, nil, 0, &n)
 	if n == 0 || n > 65536 {
-		return nil, fmt.Errorf("invalid token information size %d", n)
+		return nil, fmt.Errorf("GetTokenInformation class %d size %d: %v", class, n, queryErr)
 	}
 	b := make([]byte, n)
 	if err := windows.GetTokenInformation(token, class, &b[0], n, &n); err != nil {
@@ -114,16 +116,49 @@ func inspect(process windows.Handle) (identity, error) {
 		return result, err
 	}
 	defer token.Close()
+	// Boolean/DWORD token classes are fixed-size queries. Some Win32 token
+	// classes do not support the null-buffer size-discovery pattern.
 	for _, pair := range []struct {
 		class uint32
 		dst   *uint32
-	}{{tokenIsAppContainer, &result.AppContainer}, {tokenIsLPAC, &result.LPAC}, {tokenCapabilities, &result.CapabilityCount}} {
-		data, err := tokenInfo(token, pair.class)
+	}{{tokenIsAppContainer, &result.AppContainer}} {
+		var returned uint32
+		err := windows.GetTokenInformation(token, pair.class, (*byte)(unsafe.Pointer(pair.dst)), 4, &returned)
 		if err != nil {
-			return result, err
+			return result, fmt.Errorf("GetTokenInformation DWORD class %d: %w", pair.class, err)
 		}
-		*pair.dst = *(*uint32)(unsafe.Pointer(&data[0]))
 	}
+	var returned uint32
+	lpacErr := windows.GetTokenInformation(token, tokenIsLPAC, (*byte)(unsafe.Pointer(&result.LPAC)), 4, &returned)
+	if lpacErr == nil {
+		result.LPACSource = "TokenIsLessPrivilegedAppContainer"
+	} else {
+		// Some supported Windows versions expose the enum but not this query.
+		// Query the kernel-owned LPAC security attribute by exact name, as used by
+		// System Informer's PhDoesTokenSecurityAttributeExist. BUFFER_TOO_SMALL on
+		// this single-name null-buffer query proves the attribute exists; absence
+		// or an unsupported native API fails closed. Never trust requested flags.
+		name, nameErr := windows.NewNTUnicodeString("WIN://NOALLAPPPKG")
+		if nameErr != nil {
+			return result, nameErr
+		}
+		var required uint32
+		status, _, _ := querySecurityAttributes.Call(uintptr(token), uintptr(unsafe.Pointer(name)), 1, 0, 0, uintptr(unsafe.Pointer(&required)))
+		runtime.KeepAlive(name)
+		if uint32(status) != 0xc0000023 || required == 0 || required > 65536 {
+			return result, fmt.Errorf("LPAC query failed: DWORD=%v; security attribute NTSTATUS=0x%x size=%d", lpacErr, uint32(status), required)
+		}
+		result.LPAC = 1
+		result.LPACSource = "WIN://NOALLAPPPKG"
+	}
+	capabilityData, capabilityErr := tokenInfo(token, tokenCapabilities)
+	if capabilityErr != nil {
+		return result, capabilityErr
+	}
+	if len(capabilityData) < 4 {
+		return result, fmt.Errorf("TokenCapabilities count missing")
+	}
+	result.CapabilityCount = *(*uint32)(unsafe.Pointer(&capabilityData[0]))
 	data, err := tokenInfo(token, tokenAppContainerSID)
 	if err != nil {
 		return result, err

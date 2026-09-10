@@ -2,6 +2,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import socket
 import sys
 import tempfile
 import time
@@ -75,6 +76,23 @@ PROBE'''
         self.assertEqual(result['exit_code'], 0, result)
         self.assertEqual(result['mutations'], ['input'])
         self.assertEqual((self.repo / 'input').read_text(), 'expected')
+
+    def test_reachable_host_listener_is_unreachable_inside_verification(self):
+        self.require_linux()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(2)
+            port = listener.getsockname()[1]
+            # Prove the destination works on this host before testing denial.
+            with socket.create_connection(('127.0.0.1', port), timeout=1):
+                accepted, _ = listener.accept()
+                accepted.close()
+            result = self.run_check("python3 - <<'PROBE'\nimport socket\ns=socket.socket();s.settimeout(.3)\ntry: s.connect(('127.0.0.1', " + str(port) + "))\nexcept OSError: print('host listener denied')\nelse: raise AssertionError('host network reachable')\nPROBE")
+            self.assertEqual(result['exit_code'], 0, result)
+            self.assertEqual(result['stdout'].strip(), 'host listener denied')
+            listener.settimeout(.1)
+            with self.assertRaises(socket.timeout):
+                listener.accept()
 
     def test_hang_and_noisy_output_are_bounded(self):
         self.require_linux()

@@ -61,6 +61,13 @@ claim completed native qualification or authorize release.
 8. The engineer found evidence output exclusion could hide source drift when
    the output directory was the repository root. Development evidence must now
    live outside the repository, and source files are never excluded by output.
+9. Checkpoint `d766ab3` passed all ten development suites in an isolated,
+   unchanged checkout. Real native CI run `34439706249` then exposed Linux
+   bubblewrap bootstrap failures on both architectures. Native Windows probe
+   run `34439690985` stopped at LPAC token inspection on both architectures,
+   before executing any child probe. These failed runs are retained, not
+   counted as qualification. Targeted AppArmor prerequisite diagnostics and
+   a reachable-host loopback denial control are the next Linux experiment.
 
 ## Automated workflows
 

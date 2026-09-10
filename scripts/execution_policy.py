@@ -328,6 +328,9 @@ def verify(command, repo, cwd, stdout, stderr, timeout=120, cancel=None, admissi
             argv += ['--setenv', name, value]
         argv += ['/bin/bash', '--noprofile', '--norc', '-c', command]
         result = supervised(argv, repo, minimal_environment(), stdout, stderr, max(.01, deadline-time.monotonic()), cancel=cancel, admission_lock=admission_lock)
+        if result['exit_code'] != 0 and result['stderr'].startswith('bwrap:'):
+            result['failure_kind'] = 'sandbox-initialization-failed'
+            result['stderr'] += 'Sandbox initialization failed. Check bubblewrap and host user-namespace/AppArmor prerequisites; verification remains unprivileged and host execution is disabled.\n'
         if result["failure_kind"]:
             return {**base, **result, "confinement": "linux-bwrap-v1"}
         after = tree_state(workspace, deadline)
