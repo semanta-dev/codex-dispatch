@@ -49,6 +49,8 @@ def bash_executable() -> str:
 
 
 def state(repo, run):
+    if os.name == 'nt':
+        return windows_capture(repo, run)['files']
     names = subprocess.check_output(POLICY.GIT + ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=repo, env=POLICY.minimal_environment())
     result = {}
     deadline = time.monotonic() + 30
@@ -89,16 +91,35 @@ def check(command, repo, run, label, clean=False):
     stdout, stderr = run / (label + ".stdout"), run / (label + ".stderr")
     timeout = min(120, int(os.environ.get("CODEX_DISPATCH_TIMEOUT_MS", "120000")) / 1000)
     if not clean:
-        root = Path(subprocess.check_output(POLICY.GIT + ["rev-parse", "--show-toplevel"], cwd=repo, text=True, env=POLICY.minimal_environment()).strip())
+        root = Path(os.fsdecode(git_bytes(["rev-parse", "--show-toplevel"], repo)).strip())
         return {**POLICY.verify(command, root, repo, stdout, stderr, timeout), "clean": False}
     argv = [bash_executable(), (ROOT / "clean-verify.sh").as_posix(), run.as_posix(), bash_executable(), "-c", command]
     return {**POLICY.supervised(argv, repo, dict(os.environ), stdout, stderr, timeout), "command": command, "clean": True}
 
 
 def live_fingerprint(repo, run):
+    if os.name == 'nt':
+        return windows_capture(repo, run)['fingerprint']
     index = subprocess.check_output(POLICY.GIT + ["ls-files", "--stage", "-z"], cwd=repo, env=POLICY.minimal_environment())
     data = {"files": state(repo, run), "index_sha256": hashlib.sha256(index).hexdigest()}
     return {"version": 1, "sha256": hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()}
+
+
+def windows_capture(repo, run):
+    return windows_module().capture(repo, run)
+
+
+def windows_module():
+    spec = importlib.util.spec_from_file_location('windows_evidence', Path(__file__).with_name('windows_evidence.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def git_bytes(args, cwd=None):
+    if os.name == 'nt':
+        return windows_module()._git(Path(cwd or Path.cwd()), args, time.monotonic() + 30)
+    return subprocess.check_output(POLICY.GIT + args, cwd=cwd, env=POLICY.minimal_environment())
 
 
 def collect():
@@ -130,14 +151,14 @@ def collect():
     if len(diff) > LIMIT:
         raise ValueError("diff exceeds review bundle limit; inspect full artifact before any acceptance: " + str(run / "diff.patch"))
     bundle["diff"] = diff
-    repo = Path(subprocess.check_output(POLICY.GIT + ["rev-parse", "--show-toplevel"], text=True, env=POLICY.minimal_environment()).strip())
+    repo = Path(os.fsdecode(git_bytes(["rev-parse", "--show-toplevel"])).strip())
     effective = Path((run / "effective-workdir.txt").read_text().strip()).resolve()
     if not effective.is_dir() or not effective.is_relative_to(repo.resolve()):
         raise ValueError("effective verification directory escapes repository or is missing")
     bundle["effective_workdir"] = str(effective)
     captured_fingerprint = live_fingerprint(repo, run)
     before = state(repo, run)
-    original_index = subprocess.check_output(POLICY.GIT + ["ls-files", "--stage", "-z"], cwd=repo, env=POLICY.minimal_environment())
+    original_index = git_bytes(["ls-files", "--stage", "-z"], repo)
     test = os.environ.get("REVIEW_TEST_CMD", "") if os.environ.get("REVIEW_TEST_POLICY", "run") != "skip" else ""
     if test == "__auto__":
         test = detect_test(effective)
@@ -150,7 +171,7 @@ def collect():
         mutations.update(bundle["test"].get("mutations", []))
         after = state(repo, run)
         mutations.update(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
-        if subprocess.check_output(POLICY.GIT + ["ls-files", "--stage", "-z"], cwd=repo, env=POLICY.minimal_environment()) != original_index:
+        if git_bytes(["ls-files", "--stage", "-z"], repo) != original_index:
             mutations.add(".git/index")
     if verify:
         if verify == test and not clean:
@@ -160,7 +181,7 @@ def collect():
             mutations.update(bundle["verification"].get("mutations", []))
             after = state(repo, run)
             mutations.update(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
-    if subprocess.check_output(POLICY.GIT + ["ls-files", "--stage", "-z"], cwd=repo, env=POLICY.minimal_environment()) != original_index:
+    if git_bytes(["ls-files", "--stage", "-z"], repo) != original_index:
         mutations.add(".git/index")
     bundle["verification_mutations"] = sorted(mutations)
     bundle["changed_file_facts"] = {p: before.get(p, {"kind": "deleted"}) for p in changed}

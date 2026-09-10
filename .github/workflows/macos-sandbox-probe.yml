@@ -40,6 +40,20 @@ jobs:
       - name: Run filesystem network and detached-child controls
         run: |
           "$RUNNER_TEMP/macos-sandbox-probe" --out probe-evidence/probe.json > probe-evidence/console.txt 2>&1
+      - name: Retain sandbox startup diagnostics
+        if: always()
+        run: |
+          mkdir -p probe-evidence
+          sudo /usr/bin/log show --last 3m --style compact --predicate 'eventMessage CONTAINS "deny" AND (eventMessage CONTAINS "probe" OR eventMessage CONTAINS "sandbox-exec")' > probe-evidence/sandbox-denials.txt || true
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          reports = Path.home() / 'Library/Logs/DiagnosticReports'
+          for pattern in ('probe-*.ips', 'sandbox-exec-*.ips'):
+              for path in sorted(reports.glob(pattern))[-5:]:
+                  if path.stat().st_size < 2_000_000:
+                      shutil.copyfile(path, Path('probe-evidence') / path.name)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

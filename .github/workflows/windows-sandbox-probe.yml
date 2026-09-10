@@ -6,7 +6,10 @@ on:
     paths:
       - tests/native/windows-sandbox-probe/**
       - scripts/windows_file_policy.py
+      - scripts/windows_evidence.py
+      - scripts/review-evidence.py
       - tests/python/test_windows_file_policy.py
+      - tests/python/test_windows_evidence.py
       - .github/workflows/windows-sandbox-probe.yml
       - go.mod
       - go.sum
@@ -62,6 +65,13 @@ jobs:
           python -c "import platform,sys; print(sys.version); print(platform.machine()); assert platform.machine().lower() == ('arm64' if '$env:RUNNER_ARCH' == 'ARM64' else 'amd64')" *> probe-evidence/python-platform.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests/python -p test_windows_file_policy.py -v *> probe-evidence/file-boundaries.txt
+          exit $LASTEXITCODE
+      - name: Native bounded evidence integration tests
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force probe-evidence | Out-Null
+          python -m unittest discover -s tests/python -p test_windows_evidence.py -v *> probe-evidence/evidence-integration.txt
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()

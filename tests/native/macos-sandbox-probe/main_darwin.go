@@ -131,8 +131,8 @@ func run(out string) (err error) {
 		return err
 	}
 	report["parent_fake_environment_present"] = os.Getenv("FAKE_REVIEW_KEY") == "FAKE_PARENT_ONLY"
-	command := func(ctx context.Context, arguments ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", append([]string{"-f", profilePath, worker}, arguments...)...)
+	command := func(ctx context.Context, target string, arguments ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", append([]string{"-f", profilePath, target}, arguments...)...)
 		cmd.Dir = work
 		cmd.Env = []string{"HOME=" + work, "TMPDIR=" + work, "PATH=/usr/bin:/bin", "LANG=C"}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -140,12 +140,26 @@ func run(out string) (err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	output, boundaryErr := command(ctx, "--boundary", secret, listener.Addr().String()).CombinedOutput()
+	startup := map[string]any{}
+	for _, target := range []string{"/usr/bin/true", "/bin/sh"} {
+		arguments := []string{}
+		if target == "/bin/sh" {
+			arguments = []string{"-c", "printf shell-started"}
+		}
+		data, startErr := command(ctx, target, arguments...).CombinedOutput()
+		result := map[string]any{"stdout_stderr": string(data), "pass": startErr == nil}
+		if startErr != nil {
+			result["error"] = startErr.Error()
+		}
+		startup[target] = result
+	}
+	report["runtime_startup"] = startup
+	output, boundaryErr := command(ctx, worker, "--boundary", secret, listener.Addr().String()).CombinedOutput()
 	report["boundary_output"], report["boundary_pass"] = string(output), boundaryErr == nil
 	if boundaryErr != nil {
 		return fmt.Errorf("native boundary positive/negative controls: %w", boundaryErr)
 	}
-	owner := command(ctx, "--fork")
+	owner := command(ctx, worker, "--fork")
 	var ownerErrors bytes.Buffer
 	owner.Stderr = &ownerErrors
 	if err = owner.Start(); err != nil {
