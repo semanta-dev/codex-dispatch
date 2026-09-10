@@ -124,3 +124,31 @@ name through `NtQuerySecurityAttributesToken`. This follows the established
 which itself marks the direct LPAC enum query as TODO. A missing attribute or
 unsupported query fails closed; requested creation flags are never evidence. This correction needs a fresh native run;
 it is not evidence that LPAC or Git Bash passed.
+
+## Second native observation
+
+Candidate `cad8873`, run [34440086262](https://github.com/semanta-dev/codex-dispatch/actions/runs/34440086262),
+observed LPAC through the kernel attribute on both native architectures, with
+zero capabilities, the expected SID, job membership, and a passing `cmd.exe`
+positive control. Seven Windows HANDLE boundary tests passed on each runner.
+The full sandbox prototype remained NO-GO.
+
+The Go child imported `net`; Go 1.25 initializes Winsock during package startup.
+Under this LPAC policy its initialization error leaves `internal/poll` unset,
+and later ordinary `os.WriteFile` panics. The pinned `x/sys/windows` dependency itself imports `net`, so removing our
+direct import does not remove that startup behavior. Fixed child probes now
+use synchronous Win32 file/process APIs and explicit Winsock calls to preserve
+security/lifecycle diagnostics. A separate actual `os.WriteFile` positive control
+still reports `go_standard_library_compatible=false` on failure or recovered
+panic and vetoes the aggregate result. The workaround is not qualification of
+arbitrary Go verification and grants no registry/network capability. It requires
+another native run.
+
+MSYS Bash independently failed native object namespace initialization on amd64:
+`NtCreateDirectoryObject(\BaseNamedObjects\msys-...): STATUS_ACCESS_DENIED`.
+ARM64 Bash exited `STATUS_NO_MEMORY`. No namespace ACL or capability exception
+has been granted. The [MSYS implementation](https://github.com/msys2/msys2-runtime/blob/msys2-3.6.10/winsup/cygwin/mm/shared.cc)
+uses a per-installation native object directory with `OBJ_OPENIF`; a future
+experiment could provision only that copied runtime's unique directory with
+explicit package ACLs. Such an experiment needs separate scope review and must
+never change the parent namespace or grant broad object access.

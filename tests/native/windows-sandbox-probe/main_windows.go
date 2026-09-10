@@ -11,13 +11,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -56,13 +57,15 @@ type identity struct {
 	Arch            string `json:"observer_goarch"`
 }
 type childResult struct {
-	DenialErrors     map[string]string `json:"denial_errors"`
-	Identity         identity          `json:"identity"`
-	ReadDenied       bool              `json:"outside_read_denied"`
-	WriteDenied      bool              `json:"outside_write_denied"`
-	NetworkDenied    bool              `json:"network_denied"`
-	EnvironmentClean bool              `json:"environment_clean"`
-	Error            string            `json:"error,omitempty"`
+	GoStandardLibraryCompatible bool              `json:"go_standard_library_compatible"`
+	GoStandardLibraryError      string            `json:"go_standard_library_error,omitempty"`
+	DenialErrors                map[string]string `json:"denial_errors"`
+	Identity                    identity          `json:"identity"`
+	ReadDenied                  bool              `json:"outside_read_denied"`
+	WriteDenied                 bool              `json:"outside_write_denied"`
+	NetworkDenied               bool              `json:"network_denied"`
+	EnvironmentClean            bool              `json:"environment_clean"`
+	Error                       string            `json:"error,omitempty"`
 }
 type phase struct {
 	Stdout   string   `json:"stdout_tail"`
@@ -82,15 +85,16 @@ type lifecycleResult struct {
 	Error                string          `json:"error,omitempty"`
 }
 type report struct {
-	Breakaway json.RawMessage        `json:"breakaway_evidence,omitempty"`
-	Lifecycle lifecycleResult        `json:"lifecycle"`
-	Prototype bool                   `json:"prototype"`
-	Status    string                 `json:"status"`
-	Arch      string                 `json:"goarch"`
-	Phases    []phase                `json:"phases"`
-	Children  map[string]childResult `json:"children"`
-	Errors    []string               `json:"errors"`
-	Cleanup   []string               `json:"cleanup_errors"`
+	GoStandardLibraryCompatible bool                   `json:"go_standard_library_compatible"`
+	Breakaway                   json.RawMessage        `json:"breakaway_evidence,omitempty"`
+	Lifecycle                   lifecycleResult        `json:"lifecycle"`
+	Prototype                   bool                   `json:"prototype"`
+	Status                      string                 `json:"status"`
+	Arch                        string                 `json:"goarch"`
+	Phases                      []phase                `json:"phases"`
+	Children                    map[string]childResult `json:"children"`
+	Errors                      []string               `json:"errors"`
+	Cleanup                     []string               `json:"cleanup_errors"`
 }
 
 func tokenInfo(token windows.Token, class uint32) ([]byte, error) {
@@ -176,6 +180,106 @@ func inspect(process windows.Handle) (identity, error) {
 	result.InJob = member != 0
 	return result, nil
 }
+
+// x/sys/windows imports net in this pinned dependency, so WSAStartup can
+// poison Go poll I/O inside LPAC before main. Fixed child probes deliberately
+// use synchronous Win32 I/O to retain diagnostic evidence. This does not qualify
+// arbitrary Go applications; their runtime incompatibility remains a blocker.
+func rawWrite(path string, data []byte) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE, windows.FILE_SHARE_READ, nil, windows.CREATE_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	for len(data) > 0 {
+		var n uint32
+		if err = windows.WriteFile(handle, data, &n, nil); err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+func rawExists(path string) bool {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	_, err = windows.GetFileAttributes(name)
+	return err == nil
+}
+func socketConnect(address string) error {
+	parts := strings.Split(address, ":")
+	if len(parts) != 2 || parts[0] != "127.0.0.1" {
+		return fmt.Errorf("invalid fixed loopback address")
+	}
+	port, err := strconv.Atoi(parts[1])
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid loopback port")
+	}
+	var data syscall.WSAData
+	if err = syscall.WSAStartup(0x202, &data); err != nil {
+		return fmt.Errorf("WSAStartup: %w", err)
+	}
+	defer syscall.WSACleanup()
+	socket, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err != nil {
+		return fmt.Errorf("socket: %w", err)
+	}
+	defer syscall.Closesocket(socket)
+	return syscall.Connect(socket, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}})
+}
+func loopbackListener() (syscall.Handle, string, error) {
+	var data syscall.WSAData
+	if err := syscall.WSAStartup(0x202, &data); err != nil {
+		return syscall.InvalidHandle, "", err
+	}
+	socket, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err != nil {
+		syscall.WSACleanup()
+		return syscall.InvalidHandle, "", err
+	}
+	fail := func(err error) (syscall.Handle, string, error) {
+		syscall.Closesocket(socket)
+		syscall.WSACleanup()
+		return syscall.InvalidHandle, "", err
+	}
+	if err = syscall.Bind(socket, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		return fail(err)
+	}
+	if err = syscall.Listen(socket, 16); err != nil {
+		return fail(err)
+	}
+	address, err := syscall.Getsockname(socket)
+	if err != nil {
+		return fail(err)
+	}
+	tcp, ok := address.(*syscall.SockaddrInet4)
+	if !ok {
+		return fail(fmt.Errorf("unexpected listener address"))
+	}
+	return socket, fmt.Sprintf("127.0.0.1:%d", tcp.Port), nil
+}
+
+func checkGoStandardLibrary(scratch string) (compatible bool, diagnostic string) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			compatible = false
+			diagnostic = fmt.Sprintf("Go os.WriteFile panic: %v", failure)
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(scratch, "go-standard-library.txt"), []byte("standard-library-positive"), 0600); err != nil {
+		return false, err.Error()
+	}
+	return true, ""
+}
 func child(name string) int {
 	if name != "native" && name != "bash" {
 		return 2
@@ -187,31 +291,31 @@ func child(name string) int {
 		fmt.Fprintln(os.Stderr, "child probe refused: confinement identity is unqualified")
 		return 2
 	}
-	_, err = os.ReadFile(os.Getenv("PROBE_CREDENTIAL"))
-	result.ReadDenied = err != nil
-	if err != nil {
-		result.DenialErrors["read"] = err.Error()
+	credential, _ := windows.UTF16PtrFromString(os.Getenv("PROBE_CREDENTIAL"))
+	readHandle, readErr := windows.CreateFile(credential, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	result.ReadDenied = readErr != nil
+	if readErr != nil {
+		result.DenialErrors["read"] = readErr.Error()
+	} else {
+		windows.CloseHandle(readHandle)
 	}
-	sentinel, writeErr := os.OpenFile(os.Getenv("PROBE_SENTINEL"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	sentinelName, _ := windows.UTF16PtrFromString(os.Getenv("PROBE_SENTINEL"))
+	sentinel, writeErr := windows.CreateFile(sentinelName, windows.GENERIC_WRITE, 0, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	result.WriteDenied = writeErr != nil
 	if writeErr != nil {
 		result.DenialErrors["write"] = writeErr.Error()
+	} else {
+		windows.CloseHandle(sentinel)
 	}
-	if sentinel != nil {
-		sentinel.Write([]byte("UNEXPECTED OUTSIDE WRITE"))
-		sentinel.Close()
-	}
-	conn, err := net.DialTimeout("tcp", os.Getenv("PROBE_LISTENER"), time.Second)
+	err = socketConnect(os.Getenv("PROBE_LISTENER"))
 	result.NetworkDenied = err != nil
 	if err != nil {
 		result.DenialErrors["network"] = err.Error()
 	}
-	if conn != nil {
-		conn.Close()
-	}
+	result.GoStandardLibraryCompatible, result.GoStandardLibraryError = checkGoStandardLibrary(os.Getenv("PROBE_SCRATCH"))
 	result.EnvironmentClean = os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("PROBE_FAKE_PARENT_CREDENTIAL") == ""
 	raw, _ := json.MarshalIndent(result, "", "  ")
-	if err = os.WriteFile(filepath.Join(os.Getenv("PROBE_SCRATCH"), name+".json"), raw, 0600); err != nil {
+	if err = rawWrite(filepath.Join(os.Getenv("PROBE_SCRATCH"), name+".json"), raw); err != nil {
 		return 3
 	}
 	if result.Error != "" || facts.ProcessMachine != 0 || facts.AppContainer != 1 || facts.LPAC != 1 || facts.CapabilityCount != 0 || !facts.InJob || !result.ReadDenied || !result.WriteDenied || !result.NetworkDenied || !result.EnvironmentClean {
@@ -394,41 +498,46 @@ func lifecycleChild(mode string) int {
 	scratch := os.Getenv("PROBE_SCRATCH")
 	if mode == "delayed" {
 		raw, _ := json.Marshal(map[string]int{"pid": os.Getpid()})
-		if os.WriteFile(filepath.Join(scratch, "grandchild-ready.json"), raw, 0600) != nil {
+		if rawWrite(filepath.Join(scratch, "grandchild-ready.json"), raw) != nil {
 			return 3
 		}
 		time.Sleep(10 * time.Second)
-		if os.WriteFile(filepath.Join(scratch, "grandchild-late.txt"), []byte("late"), 0600) != nil {
+		if rawWrite(filepath.Join(scratch, "grandchild-late.txt"), []byte("late")) != nil {
 			return 3
 		}
 		return 0
 	}
 	if mode == "tree" {
-		command := exec.Command(os.Getenv("PROBE_HELPER"), "--lifecycle-child", "delayed")
-		if err := command.Start(); err != nil {
+		executable := os.Getenv("PROBE_HELPER")
+		app, _ := windows.UTF16PtrFromString(executable)
+		line, _ := windows.UTF16PtrFromString(windows.ComposeCommandLine([]string{executable, "--lifecycle-child", "delayed"}))
+		si := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
+		pi := windows.ProcessInformation{}
+		if err := windows.CreateProcess(app, line, nil, nil, false, windows.CREATE_NO_WINDOW, nil, nil, &si, &pi); err != nil {
 			return 3
 		}
+		defer windows.CloseHandle(pi.Process)
+		defer windows.CloseHandle(pi.Thread)
+		kill := func() { windows.TerminateProcess(pi.Process, 1); windows.WaitForSingleObject(pi.Process, 5000) }
 		deadline := time.Now().Add(4 * time.Second)
 		for {
-			if _, err := os.Stat(filepath.Join(scratch, "grandchild-ready.json")); err == nil {
+			if rawExists(filepath.Join(scratch, "grandchild-ready.json")) {
 				break
 			}
 			if time.Now().After(deadline) {
-				command.Process.Kill()
-				command.Wait()
+				kill()
 				return 3
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		raw, _ := json.Marshal([]int{os.Getpid(), command.Process.Pid})
-		if os.WriteFile(filepath.Join(scratch, "lifecycle-ready.json"), raw, 0600) != nil {
-			command.Process.Kill()
-			command.Wait()
+		raw, _ := json.Marshal([]int{os.Getpid(), int(pi.ProcessId)})
+		if rawWrite(filepath.Join(scratch, "lifecycle-ready.json"), raw) != nil {
+			kill()
 			return 3
 		}
 		time.Sleep(10 * time.Second)
-		os.WriteFile(filepath.Join(scratch, "parent-late.txt"), []byte("late"), 0600)
-		command.Wait()
+		rawWrite(filepath.Join(scratch, "parent-late.txt"), []byte("late"))
+		windows.WaitForSingleObject(pi.Process, 5000)
 		return 0
 	}
 	if mode == "breakaway" {
@@ -446,7 +555,7 @@ func lifecycleChild(mode string) int {
 		}
 		denied := err == windows.ERROR_ACCESS_DENIED
 		raw, _ := json.Marshal(map[string]any{"denied": denied, "error": fmt.Sprint(err), "identity": facts})
-		if os.WriteFile(filepath.Join(scratch, "breakaway.json"), raw, 0600) != nil {
+		if rawWrite(filepath.Join(scratch, "breakaway.json"), raw) != nil {
 			return 3
 		}
 		if !denied {
@@ -692,21 +801,20 @@ func run(gitRoot string) (r *report) {
 	if err = copyFile(current, helper); err != nil {
 		return fail(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, listenerAddress, err := loopbackListener()
 	if err != nil {
 		return fail(err)
 	}
-	defer listener.Close()
-	hostConnection, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
-	if err != nil {
+	defer syscall.Closesocket(listener)
+	defer syscall.WSACleanup()
+	if err = socketConnect(listenerAddress); err != nil {
 		return fail(fmt.Errorf("host loopback positive control: %w", err))
 	}
-	hostConnection.Close()
 	system := os.Getenv("SystemRoot")
 	if system == "" {
 		return fail(fmt.Errorf("missing trusted SystemRoot"))
 	}
-	env := map[string]string{"SystemRoot": system, "WINDIR": system, "PATH": filepath.Join(system, "System32"), "HOME": scratch, "USERPROFILE": scratch, "TEMP": scratch, "TMP": scratch, "LOCALAPPDATA": scratch, "PROBE_SCRATCH": scratch, "PROBE_CREDENTIAL": credential, "PROBE_SENTINEL": sentinel, "PROBE_LISTENER": listener.Addr().String(), "PROBE_HELPER": helper, "PROBE_EXPECTED_SID": sid.String()}
+	env := map[string]string{"SystemRoot": system, "WINDIR": system, "PATH": filepath.Join(system, "System32"), "HOME": scratch, "USERPROFILE": scratch, "TEMP": scratch, "TMP": scratch, "LOCALAPPDATA": scratch, "PROBE_SCRATCH": scratch, "PROBE_CREDENTIAL": credential, "PROBE_SENTINEL": sentinel, "PROBE_LISTENER": listenerAddress, "PROBE_HELPER": helper, "PROBE_EXPECTED_SID": sid.String()}
 	r.Phases = append(r.Phases, launch("cmd", filepath.Join(system, "System32", "cmd.exe"), []string{"/d", "/c", "echo native-cmd-ok>cmd-positive.txt"}, scratch, env, sid))
 	r.Phases = append(r.Phases, launch("native-denials", helper, []string{"--child", "native"}, scratch, env, sid))
 	r.Phases = append(r.Phases, launch("breakaway", helper, []string{"--lifecycle-child", "breakaway"}, scratch, env, sid))
@@ -752,6 +860,10 @@ func run(gitRoot string) (r *report) {
 		if result.Error != "" || result.Identity.ProcessMachine != 0 || result.Identity.AppContainer != 1 || result.Identity.LPAC != 1 || result.Identity.CapabilityCount != 0 || result.Identity.SID != sid.String() || !result.Identity.InJob || !result.ReadDenied || !result.WriteDenied || !result.NetworkDenied || !result.EnvironmentClean {
 			r.Errors = append(r.Errors, name+" boundary checks failed")
 		}
+	}
+	r.GoStandardLibraryCompatible = r.Children["native"].GoStandardLibraryCompatible && r.Children["bash"].GoStandardLibraryCompatible
+	if !r.GoStandardLibraryCompatible {
+		r.Errors = append(r.Errors, "Go standard-library compatibility unproven or failed; raw Win32 diagnostics do not qualify verification")
 	}
 	for _, name := range []string{"cmd-positive.txt", "bash-positive.txt", "bash-child-positive.txt"} {
 		if _, err = os.Stat(filepath.Join(scratch, name)); err != nil {
