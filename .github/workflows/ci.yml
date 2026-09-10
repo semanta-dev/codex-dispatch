@@ -57,10 +57,11 @@ jobs:
       - name: install native shell test dependencies
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/native-evidence"
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update
             sudo apt-get install -y bubblewrap ripgrep
-            bash scripts/ci-configure-bwrap.sh | tee "$RUNNER_TEMP/bwrap-prerequisite.txt"
+            bash scripts/ci-configure-bwrap.sh | tee "$RUNNER_TEMP/native-evidence/bwrap-prerequisite.txt"
           fi
           if [ "$RUNNER_OS" = macOS ]; then
             brew install bash
@@ -80,7 +81,7 @@ jobs:
           "CODEX_ACL_TEST_PASSWORD=$aclPassword" >> $env:GITHUB_ENV
       - name: native Go tests
         shell: bash
-        run: go test -json ./... > native-tests.jsonl
+        run: go test -json ./... > "$RUNNER_TEMP/native-evidence/native-tests.jsonl"
       - name: remove ACL test principal
         if: always() && runner.os == 'Windows'
         shell: pwsh
@@ -90,32 +91,27 @@ jobs:
         run: |
           suffix=""
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          go build -o "codex-dispatch$suffix" ./cmd/codex-dispatch
-          "./codex-dispatch$suffix" --version
+          go build -o "$RUNNER_TEMP/codex-dispatch$suffix" ./cmd/codex-dispatch
+          "$RUNNER_TEMP/codex-dispatch$suffix" --version
       - name: native shell and failure-injection gates
         shell: bash
         run: |
           bash --version
           suffix=""
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          export CODEX_DISPATCH_BIN="$PWD/codex-dispatch$suffix"
+          export CODEX_DISPATCH_BIN="$RUNNER_TEMP/codex-dispatch$suffix"
           export MSYS=winsymlinks:nativestrict
-          bats --print-output-on-failure tests/bats/launcher.bats tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > native-shell.tap
-          python3 -m unittest discover -s tests/python > native-python.txt 2>&1
+          bats --print-output-on-failure tests/bats/launcher.bats tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > "$RUNNER_TEMP/native-evidence/native-shell.tap"
+          python3 -m unittest discover -s tests/python > "$RUNNER_TEMP/native-evidence/native-python.txt" 2>&1
       - name: Adversarial remediation regression gates
         if: always()
         shell: bash
-        run: python3 scripts/remediation-gates.py --out "$RUNNER_TEMP/remediation-evidence"
+        run: python3 scripts/remediation-gates.py --out "$RUNNER_TEMP/native-evidence/remediation"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-evidence-${{ matrix.os }}
-          path: |
-            native-tests.jsonl
-            native-shell.tap
-            native-python.txt
-            ${{ runner.temp }}/remediation-evidence/
-            ${{ runner.temp }}/bwrap-prerequisite.txt
+          path: ${{ runner.temp }}/native-evidence/
 
   shell:
     runs-on: ubuntu-latest

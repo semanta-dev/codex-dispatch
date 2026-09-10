@@ -1,0 +1,48 @@
+name: macOS sandbox feasibility probe
+
+on:
+  push:
+    branches: [codex/plan-a-repair]
+    paths:
+      - tests/native/macos-sandbox-probe/**
+      - .github/workflows/macos-sandbox-probe.yml
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+      - name: Build native fixed controls
+        run: |
+          mkdir probe-evidence
+          go env GOOS GOARCH > probe-evidence/build-platform.txt
+          uname -a > probe-evidence/os.txt
+          sw_vers >> probe-evidence/os.txt
+          git rev-parse HEAD > probe-evidence/candidate.txt
+          go build -o "$RUNNER_TEMP/macos-sandbox-probe" ./tests/native/macos-sandbox-probe
+          shasum -a 256 "$RUNNER_TEMP/macos-sandbox-probe" > probe-evidence/binary-hash.txt
+      - name: Run filesystem network and detached-child controls
+        run: |
+          "$RUNNER_TEMP/macos-sandbox-probe" --out probe-evidence/probe.json > probe-evidence/console.txt 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-sandbox-probe-${{ matrix.os }}
+          path: probe-evidence/
+          if-no-files-found: error

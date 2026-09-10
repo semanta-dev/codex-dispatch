@@ -264,10 +264,20 @@ touch "$LAUNCHER_READY"
 sleep 30
 EOF
   ln -s "$(command -v touch)" "$NO_FLOCK_PATH/touch"
+  # Make nested cleanup ordering deterministic: the download owner can finish
+  # before the lock owner. Test cleanup must not SIGKILL that pending trap.
+  export LAUNCHER_REAL_RMDIR="$(command -v rmdir)"
+  rm "$NO_FLOCK_PATH/rmdir"
+  cat > "$NO_FLOCK_PATH/rmdir" <<'EOF'
+#!/usr/bin/env bash
+sleep .2
+exec "$LAUNCHER_REAL_RMDIR" "$@"
+EOF
+  chmod +x "$NO_FLOCK_PATH/rmdir"
   chmod +x "$NO_FLOCK_PATH/curl"
   export LAUNCHER_READY="$TMP_REPO/ready"
   export CODEX_DISPATCH_RELEASE_URL="file:///unused"
-  run python3 - "$DISPATCH" "$NO_FLOCK_PATH" <<'PYCODE'
+  run python3 - "$DISPATCH" "$NO_FLOCK_PATH" "$CACHE_VER_DIR/.lock.d" <<'PYCODE'
 import os, signal, subprocess, sys, time
 p = subprocess.Popen([sys.argv[1]], env={**os.environ, "PATH": sys.argv[2]}, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -281,8 +291,8 @@ try:
     assert p.wait(timeout=5) != 0
     # The parent shell may exit before its resource-owning children finish traps.
     deadline = time.monotonic() + 5
-    while os.listdir(os.environ["TMPDIR"]):
-        assert time.monotonic() < deadline, "download directory leaked"
+    while os.listdir(os.environ["TMPDIR"]) or os.path.exists(sys.argv[3]):
+        assert time.monotonic() < deadline, "download directory or lock leaked"
         time.sleep(.02)
 finally:
     try: os.killpg(p.pid, signal.SIGKILL)
