@@ -52,3 +52,38 @@ class EvidenceTests(unittest.TestCase):
             target.write_text(json.dumps({'version': 2, 'accepted': True, 'verification_state': 'passed',
                                           'files': {'progress.done.md': runner.fingerprint(progress)}}))
             self.assertFalse(runner.is_done(repo, packet))
+
+
+class PlanPreflightTests(unittest.TestCase):
+    def run_plan(self, numbers, dependencies=None):
+        import argparse
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            repo = root / 'repo'
+            repo.mkdir()
+            plan = root / 'plan.md'
+            plan.write_text('\n'.join(f"## Packet {number}: task-{index}\nAllowed files:\n- file-{index}\n- task-{index}.done.md\nAcceptance criteria:\n- works\nDepends on:\n{(dependencies or {}).get(str(number), '')}\nVerification:\ntrue\nProgress record:\ntask-{index}.done.md\n" for index, number in enumerate(numbers)))
+            args = argparse.Namespace(repo=str(repo), out=str(root / 'out'), plan=str(plan), shared_broker=False, shared_broker_addr='', rerun=True, isolation='none', jobs=1)
+            with patch.object(runner, 'run_packet', side_effect=lambda packet, *args: {'packet': packet.number, 'status': 'pass'}) as dispatch, contextlib.redirect_stdout(io.StringIO()):
+                code = runner.run_plan(args)
+            return code, dispatch.call_count, json.loads((root / 'out/ledger.json').read_text())
+
+    def test_duplicates_fail_before_dispatch(self):
+        for numbers in [('1', '1'), ('1', '001')]:
+            code, calls, ledger = self.run_plan(numbers)
+            self.assertEqual(code, 2)
+            self.assertEqual(calls, 0)
+            self.assertIn('duplicate normalized', str(ledger['errors']))
+            self.assertIn('task-0', str(ledger['errors']))
+            self.assertIn('task-1', str(ledger['errors']))
+
+    def test_valid_inventory_executes_every_packet(self):
+        code, calls, ledger = self.run_plan(['1', '2'])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(ledger['packets_total'], ledger['packets_run'] + ledger['packets_cached'])

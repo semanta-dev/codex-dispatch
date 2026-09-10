@@ -10,22 +10,60 @@ permissions:
 jobs:
   validate:
     uses: ./.github/workflows/ci.yml
-  goreleaser:
+  promote:
     needs: validate
+    # Configure required independent reviewers and prevent self-review on this
+    # environment. Missing protection, approved digest, or evidence is NO-GO.
+    environment: release-promotion
     permissions:
       contents: write
+      actions: read
     runs-on: ubuntu-latest
+    env:
+      TRUSTED_PROMOTION_RUN_ID: ${{ vars.PROMOTION_RUN_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-python@v5
         with:
-          go-version: "1.25.12"
-      - uses: goreleaser/goreleaser-action@v6
+          python-version: "3.12"
+      - name: Verify approval protection and evidence origin
+        uses: actions/github-script@v7
         with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+          script: |
+            const {owner, repo} = context.repo;
+            const {data: environment} = await github.rest.repos.getEnvironment({owner, repo, environment_name: 'release-promotion'});
+            const rule = environment.protection_rules.find(rule => rule.type === 'required_reviewers');
+            if (!rule || !rule.prevent_self_review || !rule.reviewers?.length) throw new Error('Independent protected-environment approval is required');
+            const run_id = Number(process.env.TRUSTED_PROMOTION_RUN_ID);
+            if (!Number.isSafeInteger(run_id) || run_id <= 0) throw new Error('Missing trusted promotion CI run');
+            const {data: run} = await github.rest.actions.getWorkflowRun({owner, repo, run_id});
+            const {data: workflow} = await github.rest.actions.getWorkflow({owner, repo, workflow_id: run.workflow_id});
+            if (run.conclusion !== 'success' || run.head_sha !== context.sha || run.head_repository.full_name !== `${owner}/${repo}` || workflow.path !== '.github/workflows/ci.yml' || !['push', 'workflow_dispatch'].includes(run.event)) {
+              throw new Error('Promotion evidence must originate from successful same-candidate trusted CI');
+            }
+      - uses: actions/download-artifact@v4
+        with:
+          name: promotion-evidence
+          path: promotion-evidence
+          run-id: ${{ vars.PROMOTION_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate complete approved promotion evidence
+        run: python3 scripts/promotion-gate.py promotion-evidence/promotion-record.json
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPROVED_PROMOTION_RECORD_SHA256: ${{ secrets.APPROVED_PROMOTION_RECORD_SHA256 }}
+      - name: Publish exactly the approved release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(cat VERSION)"
+          gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
+            promotion-evidence/assets/codex-dispatch_linux-amd64.tar.gz \
+            promotion-evidence/assets/codex-dispatch_linux-arm64.tar.gz \
+            promotion-evidence/assets/codex-dispatch_darwin-amd64.tar.gz \
+            promotion-evidence/assets/codex-dispatch_darwin-arm64.tar.gz \
+            promotion-evidence/assets/codex-dispatch_windows-amd64.zip \
+            promotion-evidence/assets/codex-dispatch_windows-arm64.zip \
+            promotion-evidence/assets/checksums.txt

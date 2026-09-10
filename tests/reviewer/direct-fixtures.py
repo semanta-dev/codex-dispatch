@@ -45,7 +45,8 @@ def freeze(out):
     dump(out / 'frozen-sha256.json', {p.relative_to(out).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in out.rglob('*') if p.is_file()})
 
 
-def fixture_input(fixture, work):
+def fixture_payload(fixture, test):
+    """Build exact reviewer input from frozen files and explicit test evidence."""
     def read(name, default=''):
         path = fixture / name
         return path.read_text().strip() if path.exists() else default
@@ -56,15 +57,24 @@ def fixture_input(fixture, work):
         'lines_added': sum(l.startswith('+') and not l.startswith('+++') for l in diff.splitlines()),
         'lines_removed': sum(l.startswith('-') and not l.startswith('---') for l in diff.splitlines())}
     policy, command = read('test-policy.txt', 'skip'), read('test-cmd.txt')
-    test = None
-    if policy != 'skip' and command:
-        proc = subprocess.run(['bash', '-c', command], cwd=work, capture_output=True, text=True, timeout=30)
-        test = {'command': command, 'exit_code': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr}
     bundle = {'complete': True, 'result': result, 'diff': diff, 'test': test, 'verification': None,
               'verification_mutations': [], 'changed_file_facts': {}}
     return {'TASK': read('task.txt'), 'ACCEPTANCE': read('acceptance.txt'), 'CONSTRAINTS': read('constraints.txt'),
             'FILES': '', 'TEST_POLICY': policy, 'TEST_CMD': command, 'VERIFY_CMD': '', 'CLEAN_VERIFY': False,
             'bundle': bundle, 'result': result, 'previous_bundle': None}
+
+
+def fixture_input(fixture, work):
+    """Execute the fixture test once, then use the pure canonical payload."""
+    def read(name, default=""):
+        path = fixture / name
+        return path.read_text().strip() if path.exists() else default
+    policy, command = read("test-policy.txt", "skip"), read("test-cmd.txt")
+    test = None
+    if policy != "skip" and command:
+        proc = subprocess.run(["bash", "-c", command], cwd=work, capture_output=True, text=True, timeout=30)
+        test = {"command": command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+    return fixture_payload(fixture, test)
 
 
 def run(out):

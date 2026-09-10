@@ -74,6 +74,15 @@ class APIReviewTests(unittest.TestCase):
                 self.assertEqual(report['run_dir'], '/run/2')
                 repair.assert_called_once()
 
+    def test_auto_detection_passes_effective_command_to_reviewer(self):
+        config = {'clean_verify': False}
+        env = {key: '' for key in ['CODEX_TASK', 'CODEX_ACCEPTANCE', 'CODEX_CONSTRAINTS', 'CODEX_FILES', 'REVIEW_TEST_POLICY', 'REVIEW_VERIFY_CMD']}
+        env['REVIEW_TEST_CMD'] = '__auto__'
+        for resolved in ['', 'make test']:
+            bundle = {'test_command': resolved, 'result': {}}
+            self.assertEqual(API.variables(config, env, bundle)['TEST_CMD'], resolved)
+            self.assertEqual(env['REVIEW_TEST_CMD'], '__auto__')
+
     def test_history_rejects_post_pass_dispatch_and_changed_profile(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'ANTHROPIC_BASE_URL': 'http://localhost:44444', 'ANTHROPIC_API_KEY': ''}):
             root = Path(folder)

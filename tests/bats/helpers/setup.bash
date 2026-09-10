@@ -34,21 +34,26 @@ cddx_setup_binary() {
 cddx_build_release_fixture() {
   local out="$1" _version="$2" platform="$3" content="${4:-stub-ok}"
   mkdir -p "$out"
-  local stage
+  local stage bin="codex-dispatch" ext="tar.gz"
+  case "$platform" in windows-*) bin="codex-dispatch.exe"; ext="zip" ;; esac
   stage="$(mktemp -d)"
-  cat > "$stage/codex-dispatch" <<EOF
+  cat > "$stage/$bin" <<EOF
 #!/usr/bin/env bash
 echo "${content}"
 EOF
-  chmod +x "$stage/codex-dispatch"
-  ( cd "$stage" && tar -czf "${out}/codex-dispatch_${platform}.tar.gz" codex-dispatch )
+  chmod +x "$stage/$bin"
+  if [ "$ext" = zip ]; then
+    ( cd "$stage" && zip -q "${out}/codex-dispatch_${platform}.zip" "$bin" ) || return
+  else
+    ( cd "$stage" && tar -czf "${out}/codex-dispatch_${platform}.tar.gz" "$bin" ) || return
+  fi
   local sum
   if command -v sha256sum >/dev/null 2>&1; then
-    sum="$(sha256sum "${out}/codex-dispatch_${platform}.tar.gz" | awk '{print $1}')"
+    sum="$(sha256sum "${out}/codex-dispatch_${platform}.${ext}" | awk '{print $1}')"
   else
-    sum="$(shasum -a 256 "${out}/codex-dispatch_${platform}.tar.gz" | awk '{print $1}')"
+    sum="$(shasum -a 256 "${out}/codex-dispatch_${platform}.${ext}" | awk '{print $1}')"
   fi
-  printf '%s  codex-dispatch_%s.tar.gz\n' "$sum" "$platform" > "${out}/checksums.txt"
+  printf '%s  codex-dispatch_%s.%s\n' "$sum" "$platform" "$ext" > "${out}/checksums.txt"
   rm -rf "$stage"
   printf 'file://%s\n' "$out"
 }
@@ -58,6 +63,7 @@ cddx_detect_platform() {
   case "$(uname -s)" in
     Linux)  os="linux"  ;;
     Darwin) os="darwin" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) os="windows" ;;
   esac
   case "$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;

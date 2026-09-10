@@ -67,6 +67,9 @@ class StructuredReportTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name).resolve()
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        (self.repo / "hello.txt").write_text("hello")
         self.run = self.repo / '.codex-dispatch/runs/current'
         self.run.mkdir(parents=True)
         sid = str(uuid.uuid4())
@@ -83,10 +86,14 @@ class StructuredReportTests(unittest.TestCase):
         path.write_text(json.dumps(saved))
         self.ledger = path.with_suffix('.runs.json')
         self.ledger.write_text(json.dumps({'identity': identity, 'attempts': [{'state': 'complete', 'iteration': 1, 'run_dir': str(self.run), 'session_id': 'codex-current'}]}))
+        spec = importlib.util.spec_from_file_location('evidence', PROFILE.ROOT / 'scripts/review-evidence.py')
+        self.collector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.collector)
+        self.bundle['live_fingerprint'] = self.collector.live_fingerprint(self.repo, self.run)
         self.persist()
-        self.git = patch.object(PROFILE.subprocess, 'check_output', return_value=str(self.repo) + '\n')
-        self.git.start()
-        self.addCleanup(self.git.stop)
+        previous = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, previous)
 
     def persist(self):
         (self.run / 'result.json').write_text(self.json.dumps(self.result))
@@ -96,6 +103,39 @@ class StructuredReportTests(unittest.TestCase):
         self.assertEqual(PROFILE.validate_result(self.final, self.prompt), self.report)
         self.report['session_id'] = 'stale'
         with self.assertRaisesRegex(ValueError, 'chain tail'):
+            PROFILE.validate_result(self.final, self.prompt)
+
+    def test_live_drift_rejects_and_preserves_user_changes(self):
+        import subprocess
+        actions = {
+            'edit': lambda: (self.repo / 'hello.txt').write_text('unreviewed'),
+            'delete': lambda: (self.repo / 'hello.txt').unlink(),
+            'new-input': lambda: (self.repo / 'dependency').write_text('unreviewed'),
+            'mode': lambda: (self.repo / 'hello.txt').chmod(0o755),
+            'index': lambda: subprocess.run(['git', 'add', 'hello.txt'], cwd=self.repo, check=True),
+            'symlink': lambda: ((self.repo / 'hello.txt').unlink(), (self.repo / 'hello.txt').symlink_to('dependency')),
+        }
+        for name, action in actions.items():
+            with self.subTest(name=name):
+                path = self.repo / 'hello.txt'
+                if path.exists() or path.is_symlink():
+                    path.unlink()
+                path.write_text('hello')
+                path.chmod(0o644)
+                (self.repo / 'dependency').unlink(missing_ok=True)
+                subprocess.run(['git', 'read-tree', '--empty'], cwd=self.repo, check=True)
+                self.bundle['live_fingerprint'] = self.collector.live_fingerprint(self.repo, self.run)
+                self.persist()  # Evidence exists before the adversary acts.
+                action()
+                altered = self.collector.live_fingerprint(self.repo, self.run)
+                with self.assertRaisesRegex(ValueError, 'live tree or index changed'):
+                    PROFILE.validate_result(self.final, self.prompt)
+                self.assertEqual(self.collector.live_fingerprint(self.repo, self.run), altered)
+
+    def test_missing_fingerprint_cannot_grant_pass(self):
+        del self.bundle['live_fingerprint']
+        self.persist()
+        with self.assertRaisesRegex(ValueError, 'live tree'):
             PROFILE.validate_result(self.final, self.prompt)
 
     def test_success_without_structured_output_never_passes(self):

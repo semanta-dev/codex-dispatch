@@ -2,11 +2,22 @@
 
 A Claude Code plugin that delegates well-scoped coding tasks to the local OpenAI Codex CLI and reviews Codex's output through a structured verdict loop.
 
-> **Status:** v0.5.0. The dispatch core is a single Go binary (`codex-dispatch`) distributed via GitHub Releases; the shell scripts are thin launchers that resolve and exec the binary. New dispatch planning should use the GraphRAG packet workflow, whose plan and spec files live under `docs/graphrag/` in your target project.
+> **Status:** v0.5.0 source candidate, CTO NO-GO pending remediation and native qualification. The v0.5.0 release asset is not yet published. The dispatch core is a single Go binary (`codex-dispatch`) distributed via GitHub Releases; the shell scripts are thin launchers that resolve and exec the binary. New dispatch planning should use the GraphRAG packet workflow, whose plan and spec files live under `docs/graphrag/` in your target project.
 
 ## Quickstart
 
-Zero to a first dispatch in under five minutes.
+For this prerelease checkout, build the dispatch binary with Go 1.25.12 and
+export its absolute path before starting Claude:
+
+```bash
+go build -o "$PWD/dist/codex-dispatch" ./cmd/codex-dispatch
+export CODEX_DISPATCH_BIN="$PWD/dist/codex-dispatch"
+```
+
+On Windows, use `dist/codex-dispatch.exe` in both commands. Current confined
+verification requires Linux bubblewrap (`bwrap`); unsupported backends fail
+closed. This containment does not satisfy the required macOS/Windows release
+gates. See [remediation progress](docs/remediation-progress.md).
 
 **1. Enable the plugin (local clone).** From a clone of this repo, register it as a local Claude Code plugin and restart Claude Code so the manifest, commands, and subagents load:
 
@@ -28,6 +39,12 @@ codex --version   # must report >= 0.130.0
 ```text
 /codex add a --json flag to cmd/list that prints the results as a JSON array
 ```
+
+Direct existing-session `/codex` defaults to the API review controller and
+requires the configured reviewer transport credential. Completion is locally
+validated before the hook stops. The explicit CLI transport inside an existing
+session is legacy and unqualified; use `scripts/codex-reviewed.py` for CLI review
+with final local validation.
 
 `/codex` dispatches through a command-expansion hook before Claude inference, then reviews the completed evidence with Haiku and iterates within the requested cap. Supply explicit acceptance criteria for precise review; otherwise the task itself is the acceptance requirement.
 
@@ -60,12 +77,17 @@ Codex's edits land directly in your working tree. The plugin never commits, bran
 - `/codex-orchestrate <task-or-plan>` — route selector that lets Claude choose Codex-authored GraphRAG spec/plan drafting, `/codex`, one GraphRAG packet, full-plan fanout, shared-broker cost mode, or direct Claude handling based on task shape.
 - `/graphrag-codex-plan <feature>` — dispatches Codex to write GraphRAG spec and packet plan docs under `docs/graphrag/`, then uses Claude review before any implementation runs.
 - `/graphrag-codex <plan> [packet]` — GraphRAG packet bridge that executes exactly one `graphrag-codex-planner` packet through the same Codex implementation loop.
-- `/graphrag-codex-run <plan> [--jobs N] [--isolation none|worktree]` — plan-level GraphRAG runner that schedules independent packets in the single working tree by default (`--isolation none`, overlap-partitioned with per-file locks), verifies each packet, and writes a JSON execution ledger. `--isolation worktree` is the opt-in isolated-tree fallback.
+- `/graphrag-codex-run <plan> [--jobs N] [--isolation none|worktree]` — plan-level GraphRAG runner that schedules independent packets in the single working tree by default (`--isolation none`, with dispatch and verification serialized under a checkout lock), verifies each packet, and writes a JSON execution ledger. `--isolation worktree` is the opt-in isolated-tree fallback.
 - `codex-dispatch` subagent — autonomous route for the main Claude agent to delegate self-contained implementation tasks to Codex.
 - `graphrag-codex-dispatch` subagent — packet-oriented route that preserves GraphRAG allowed-file, verification, and progress-record rules.
 - `codex-reviewer` subagent — structured pass / needs-changes / fail verdicts that drive the iteration loop and decide whether to resume Codex's session or start fresh.
 
-All surfaces share a single Go dispatch core (the `codex-dispatch` binary, launched via `scripts/dispatch-codex.sh`) and a per-run artifact contract.
+Direct `/codex`, simple-task orchestration, and delegated `codex-dispatch`
+requests use the canonical reviewed controller. Delegation requires explicit
+acceptance criteria; it preserves the controller's parser, default three
+iterations, maximum ten, confinement, receipt validation, and retry policy.
+GraphRAG packet routes retain their separate packet/scope/ledger contract;
+they are not equivalent simple-task review routes.
 
 ## Prerequisites
 
@@ -81,8 +103,9 @@ All surfaces share a single Go dispatch core (the `codex-dispatch` binary, launc
 Until the plugin is published, install it from a local clone:
 
 1. Clone this repo.
-2. Add it as a local plugin in Claude Code (see Claude Code's plugin docs for your install method).
-3. Restart Claude Code so the manifest, commands, and subagents are picked up.
+2. Build and export `CODEX_DISPATCH_BIN` using the prerelease Quickstart above.
+3. Add it as a local plugin in Claude Code (see Claude Code's plugin docs for your install method).
+4. Restart Claude Code so the manifest, commands, and subagents are picked up.
 
 For project-scoped GraphRAG dispatch, install or enable only this plugin plus the
 GraphRAG workflow plugin/skills you use for planning and review. Superpowers is
@@ -237,24 +260,11 @@ The main Claude agent can delegate to the `codex-dispatch` subagent autonomously
 
 **Optional inputs:** `CONSTRAINTS`, `FILES`, `TEST POLICY` (`run` / `skip`), `TEST CMD`, `MAX ITER`, `NO RESUME`.
 
-**Return shape** (JSON, last block of the response):
-
-```json
-{
-  "status": "pass | fail",
-  "iterations": 2,
-  "files_changed": ["app/main.py"],
-  "summary": "completed in 2 iterations; modified app/main.py",
-  "final_feedback": ""
-}
-```
-
-**Limitations:**
-
-- Refuses to invent acceptance criteria. If `ACCEPTANCE CRITERIA` is missing or empty, returns `status: fail` with `summary: "underspecified: ..."` immediately.
-- Never asks the user (or the parent agent) questions — the loop is automated.
-- Never commits, branches, pushes, or reverts. Codex's edits land in the working tree; the parent agent owns the next move.
-- Best for tasks with clear behavioral acceptance and well-bounded files. For exploratory work, design decisions, or refactors without behavioral checks, do the design first and dispatch the resulting concrete task.
+**Return contract:** the canonical validated report uses `kind`, `verdict`,
+`reason`, `iterations`, `max_iterations`, `files_changed`, `session_id`,
+`run_dir`, `fell_back_to_fresh`, and `feedback`. Consumers must check the
+process exit status and `verdict`; the old `status`/`summary` shape is retired.
+Invalid adapter input returns exit 64 with a JSON error on stderr, before dispatch.
 
 ## Run artifacts
 
@@ -361,7 +371,7 @@ Two layers return codes from disjoint ranges. Full table in [`docs/configuration
 | **`codex` not found (exit 3)** | Put `codex` on `$PATH`, or point the broker at it with `CODEX_BROKER_CODEX_BIN`. |
 | **Broker won't start / stale `broker.addr`** | The dispatch path auto-heals a dead endpoint (pings, then respawns). To force a clean restart: `codex-dispatch dispatch --list`, then `rm -f .codex-dispatch/broker.addr .codex-dispatch/broker.pid` and re-dispatch. If you set `CODEX_BROKER_ADDR_PATH`, remove that path instead. |
 | **Codex sandbox-denied / `bwrap: setting up uid map: Permission denied`** | Codex's Linux sandbox uses bubblewrap, which needs unprivileged user namespaces. On hosts that restrict them (e.g. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`), the sandboxed modes `read-only`/`workspace-write` can't start the sandbox. Because `workspace-write` is now the default, on such a host the dispatch **fails fast** (exit `64`) with an actionable message rather than letting every shell command fail cryptically — either set `CODEX_SANDBOX=danger-full-access` (the explicit opt-in that skips the sandbox), or lift the restriction (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Any unrecognized `CODEX_SANDBOX` value fails validation with exit `64`. |
-| **Network failure downloading the binary (exit 7)** | Offline-install: download `codex-dispatch_<os>-<arch>.tar.gz` (`.zip` on Windows) + `checksums.txt` from the [releases page](https://github.com/semanta-dev/codex-dispatch/releases) into `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/` and re-run, or set `CODEX_DISPATCH_BIN` to a prebuilt binary. |
+| **Network failure downloading the binary (exit 7)** | Offline-install: download `codex-dispatch_<os>-<arch>.tar.gz` (`.zip` on Windows) + `checksums.txt` from the [releases page](https://github.com/semanta-dev/codex-dispatch/releases) and verify the archive checksum, then extract the executable into `${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v<VERSION>/manual/` and re-run. Archives alone are not consumed by that slot. For this prerelease checkout, use the source-build override in Quickstart. |
 | **Run reports `exit_code: 4` (no meaningful edits)** | The turn produced no repo edits. Tighten the task/acceptance, add relevant `--files`, and re-dispatch. (This is a `result.json` value, not a process exit code; detached runs never report it.) |
 
 See [`docs/configuration.md#troubleshooting`](docs/configuration.md#troubleshooting) for the expanded version.

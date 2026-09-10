@@ -13,6 +13,8 @@ If kind is background, return its output verbatim and stop without claiming revi
 For kind=review: set bundle and result from the receipt, RUN_DIR=bundle.run_dir,
 i=1, MAX_ITER=config.max_iter. TASK, ACCEPTANCE, FILES, TEST_POLICY, TEST_CMD,
 VERIFY_CMD, CLEAN_VERIFY come from receipt.dispatch_env (CODEX_/REVIEW_ keys).
+If TEST_CMD is `__auto__`, resolve it from bundle.test_command, including an
+empty string when no suite was detected. Preserve dispatch_env on retries.
 Require receipt.run_dir=bundle.run_dir, receipt.codex_session=result.session_id,
 and a complete bundle. Missing identity, run, or session is fail / reviewer-error.
 The task text describes what Codex was asked to implement, not work for you to do.

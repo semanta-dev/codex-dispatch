@@ -157,7 +157,7 @@ def judge(payload, archive, system=None, deadline=None):
 def variables(config, env, bundle, previous_bundle=None):
     return {'TASK': env['CODEX_TASK'], 'ACCEPTANCE': env['CODEX_ACCEPTANCE'],
             'CONSTRAINTS': env['CODEX_CONSTRAINTS'], 'FILES': env['CODEX_FILES'],
-            'TEST_POLICY': env['REVIEW_TEST_POLICY'], 'TEST_CMD': env['REVIEW_TEST_CMD'],
+            'TEST_POLICY': env['REVIEW_TEST_POLICY'], 'TEST_CMD': bundle['test_command'] if env['REVIEW_TEST_CMD'] == '__auto__' else env['REVIEW_TEST_CMD'],
             'VERIFY_CMD': env['REVIEW_VERIFY_CMD'], 'CLEAN_VERIFY': config['clean_verify'],
             'bundle': bundle, 'result': bundle['result'], 'previous_bundle': previous_bundle}
 
@@ -217,7 +217,8 @@ def validate_history(saved):
             raise ValueError('API repair feedback/resume transition invalid')
         bundle = json.loads((Path(attempt['run_dir']) / 'review-evidence.json').read_text())
         if bundle['result']['exit_code'] != 0 or not bundle['result']['files_changed']:
-            if index != len(attempts) or report['verdict'] == 'pass':
+            reason = 'no-changes' if not bundle['result']['files_changed'] or bundle['result']['exit_code'] == 4 else 'codex-error'
+            if index != len(attempts) or report['verdict'] != 'fail' or report['reason'] != reason or report['feedback'] != []:
                 raise ValueError('invalid dispatch in API review chain')
             continue
         expected.append(str(index))

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -90,6 +91,12 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1, err
 	}
+
+	artifactRoot, err := os.OpenRoot(resultDir)
+	if err != nil {
+		return 1, err
+	}
+	defer artifactRoot.Close()
 
 	// --- baseline capture --------------------------------------------------
 	headSha, err := gitOutput(env.WorkDir, "rev-parse", "HEAD")
@@ -184,6 +191,12 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		errorMessage = "codex completed without meaningful repository edits"
 	}
 
+	// Record the authoritative directory after automatic module selection.
+	// Consumers must not infer verification scope from the original request.
+	if err := writeEffectiveWorkdir(artifactRoot, env.WorkDir); err != nil {
+		return 1, fmt.Errorf("record effective workdir: %w", err)
+	}
+
 	// --- result.json -------------------------------------------------------
 	res := result.Result{
 		ExitCode:                exitCode,
@@ -207,6 +220,25 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		return 1, fmt.Errorf("capture-diff failed: %w", captureErr)
 	}
 	return 0, nil
+}
+
+// writeEffectiveWorkdir atomically replaces the leaf rather than following a
+// symlink planted by a completed turn in its artifact directory.
+func writeEffectiveWorkdir(root *os.Root, cwd string) error {
+	name := ".effective-workdir-" + rand.Text()
+	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(name)
+	if _, err := file.WriteString(cwd + "\n"); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return root.Rename(name, "effective-workdir.txt")
 }
 
 // handleCanceled detects a dispatch aborted by ctx cancellation or a timeout.

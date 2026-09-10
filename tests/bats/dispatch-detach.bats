@@ -183,3 +183,25 @@ _detach_wait_terminal() {
   [ "$(echo "$output" | jq -r '.session_id')" = thread-detach-restart ]
   [ "$(echo "$output" | jq -r '.exit_code')" -eq 0 ]
 }
+
+@test "supervised cold detach hands broker ownership off after a valid task id" {
+  [ ! -f "$TEST_REPO/.codex-dispatch/broker.pid" ]
+  run python3 - "$REPO_ROOT" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('hook', root / 'scripts/hooks/codex-expansion.py')
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+print(hook.invoke([hook.EVIDENCE.bash_executable(), str(root / 'scripts/dispatch-codex.sh'), '--detach'],
+                  dict(os.environ), Path.cwd(), background_handoff=True), end='')
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^t_[a-f0-9]+$ ]]
+  local task_id="$output"
+  _detach_wait_terminal "$task_id"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state":"done"'* ]] || [[ "$output" == *'"state": "done"'* ]]
+}

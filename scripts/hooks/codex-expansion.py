@@ -66,13 +66,14 @@ def detect_test(repo):
 
 def environment(config, repo):
     env = dict(os.environ)
+    env.setdefault("CODEX_REVIEW_TRANSPORT", "api")
     for key in ["CODEX_RESULT_DIR", "CODEX_SESSION_ID", "CODEX_FEEDBACK"]:
         env.pop(key, None)
     env.update({"CODEX_TASK": config["task"], "CODEX_ACCEPTANCE": config["acceptance"] or config["task"],
                 "CODEX_FILES": config["files"], "CODEX_WORKDIR": config["workdir"],
                 "CODEX_CONSTRAINTS": "do not touch unrelated files; do not add new dependencies without justification; " + config["constraints"],
                 "REVIEW_TEST_POLICY": "skip" if config["no_tests"] else "run",
-                "REVIEW_TEST_CMD": config["test_cmd"] or ("" if config["no_tests"] else detect_test(repo)),
+                "REVIEW_TEST_CMD": config["test_cmd"] or ("" if config["no_tests"] else "__auto__"),
                 "REVIEW_VERIFY_CMD": config["verify_cmd"], "REVIEW_CLEAN_VERIFY": str(config["clean_verify"]).lower()})
     # Preserve a stricter operator timeout; reserve time to record failures before
     # the enclosing hook's 480-second deadline.
@@ -81,31 +82,41 @@ def environment(config, repo):
     return env
 
 
-def invoke(argv, env, cwd, deadline=None):
+def invoke(argv, env, cwd, deadline=None, background_handoff=False, on_handoff=None):
     remaining = min(HELPER_DEADLINE, deadline - time.monotonic()) if deadline is not None else HELPER_DEADLINE
     if remaining <= 10:
         raise ValueError('command controller deadline exhausted')
+    env = {key: value for key, value in env.items() if key not in {'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'}}
     env = {**env, 'CODEX_DISPATCH_TIMEOUT_MS': str(min(int(env.get('CODEX_DISPATCH_TIMEOUT_MS', '400000')), int((remaining - 10) * 1000)))}
-    options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-    proc = subprocess.Popen(argv, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
-    try:
-        stdout, stderr = proc.communicate(timeout=remaining)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        raise ValueError("dispatch/evidence deadline exceeded; no review permitted")
-    if proc.returncode:
-        raise ValueError(f"dispatch/evidence failed ({proc.returncode}): {stderr[-2000:]} {stdout[-2000:]}")
-    return stdout
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="codex-helper-") as directory:
+        result = EVIDENCE.POLICY.supervised(argv, cwd, env, Path(directory) / "stdout", Path(directory) / "stderr", remaining, background_handoff=background_handoff, handoff_record=(Path(env["REVIEW_RECEIPT_PATH"]).parent / ".handoffs" / (Path(env["REVIEW_RECEIPT_PATH"]).stem + ".json")) if background_handoff and env.get("REVIEW_RECEIPT_PATH") else None, on_handoff=on_handoff)
+        if result['exit_code']:
+            raise ValueError(f"dispatch/evidence failed ({result['exit_code']}): {result['stderr'][-2000:]} {result['stdout'][-2000:]}")
+        if result['output_truncated']:
+            # Controller JSON must be complete; helper output is capped on disk.
+            return Path(result['stdout_path']).read_text()
+        return result['stdout']
 
 
 def write(path, record):
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(record, indent=2) + "\n")
     os.replace(temp, path)
+
+
+def validate_api_completion(saved, repo, raw):
+    spec = importlib.util.spec_from_file_location('api_review', ROOT / 'api-review.py')
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    api.validate_history(saved)
+    spec = importlib.util.spec_from_file_location('compact_profile', ROOT / 'codex-reviewed.py')
+    profile = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profile)
+    return profile.validate_result({'subtype': 'success', 'terminal_reason': 'completed',
+        'session_id': saved['identity']['session_id'], 'structured_output': saved['report']},
+        '/codex-dispatch:codex ' + raw, repo=repo,
+        receipt_path=repo / '.codex-dispatch/expansions' / saved['identity']['session_id'] / (saved['identity']['prompt_id'] + '.json'))
 
 
 def expand(event):
@@ -139,17 +150,26 @@ def expand(event):
         saved = json.loads(path.read_text())
         if saved.get("identity") != identity or saved.get("status") != "complete":
             raise ValueError("duplicate command is pending/failed or identity changed")
+        if saved.get("review_transport") == "api":
+            if saved.get("terminal_validation") != "passed":
+                raise ValueError("terminal validation pending or failed")
+            validate_api_completion(saved, repo, raw)
         return saved["output"]
+    background_transfer = None
+    def remember_handoff(record):
+        nonlocal background_transfer
+        background_transfer = record
     try:
         api = None
         if env.get('CODEX_REVIEW_TRANSPORT') == 'api':
             spec = importlib.util.spec_from_file_location('api_review', ROOT / 'api-review.py')
             api = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(api)
-            api.transport()  # Validate explicit transport before paid dispatch.
         background = ["--detach"] if config["detach"] else ["--list"] if config["list"] else ["--status", config["status"]] if config["status"] else ["--cancel", config["cancel"]] if config["cancel"] else []
+        if not background and api is not None:
+            api.transport()  # Only synchronous review needs a reviewer credential.
         if background:
-            output = invoke([EVIDENCE.bash_executable(), (ROOT / "dispatch-codex.sh").as_posix(), *background], env, cwd, deadline)
+            output = invoke([EVIDENCE.bash_executable(), (ROOT / "dispatch-codex.sh").as_posix(), *background], env, cwd, deadline, background_handoff=config["detach"], on_handoff=remember_handoff)
             payload = {"identity": identity, "kind": "background", "output": output}
         else:
             bundle = json.loads(invoke([sys.executable, str(ROOT / "review-evidence.py")], env, cwd, deadline))
@@ -166,15 +186,22 @@ def expand(event):
                 def repair(repair_env, repair_cwd):
                     return json.loads(invoke([sys.executable, str(ROOT / 'review-evidence.py')], repair_env, repair_cwd, deadline))
                 report = api.control(payload, config, env, cwd, repair, deadline)
-            output = {'continue': False, 'stopReason': 'Codex API review controller completed'}
-            write(path, {**header, 'status': 'complete', 'payload': payload, 'output': output,
-                         'review_transport': 'api', 'report': report})
+            display = report['output'] if report['kind'] == 'background' else '\n'.join([f"Codex {report['verdict']}: {report['reason']}", f"iterations: {report['iterations']} / {report['max_iterations']}", 'files: ' + ', '.join(report['files_changed']), *report['feedback']])
+            output = {'continue': False, 'stopReason': 'Codex API review controller completed', 'systemMessage': display}
+            saved = {**header, 'status': 'complete', 'payload': payload, 'output': output,
+                     'review_transport': 'api', 'report': report, 'terminal_validation': 'pending'}
+            write(path, saved)
+            validate_api_completion(saved, repo, raw)
+            write(path, {**saved, 'terminal_validation': 'passed'})
             return output
         context = "CODEX_EXPANSION_RECEIPT\n" + json.dumps(payload) + "\nEND_CODEX_EXPANSION_RECEIPT"
         output = {"hookSpecificOutput": {"hookEventName": "UserPromptExpansion", "additionalContext": context}}
         write(path, {**header, "status": "complete", "payload": payload, "output": output})
         return output
-    except Exception as error:
+    except BaseException as error:
+        if background_transfer is not None:
+            write(path, {**header, "status": "background-started", "handoff": background_transfer, "error": str(error)})
+            raise ValueError("background task started before interruption: " + background_transfer['task_id']) from error
         write(path, {**header, "status": "failed", "error": str(error)})
         raise
 

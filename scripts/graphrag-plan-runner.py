@@ -17,6 +17,7 @@ editors must still coordinate; this mutex does not isolate the OS filesystem.
 
 from __future__ import annotations
 
+import importlib.util
 import argparse
 import concurrent.futures
 import json
@@ -27,6 +28,7 @@ import pathlib
 import re
 import signal
 import subprocess
+import sys
 import shutil
 import tempfile
 import threading
@@ -38,20 +40,14 @@ from typing import Any
 ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 PROCESS_LOCK = threading.RLock()
 CANCEL_REQUESTED = threading.Event()
+PLAN_DEADLINE = float("inf")
 
 
 def stop_process_tree(proc: subprocess.Popen) -> None:
-    if os.name == "nt":
-        # Each child has its own console group, so CTRL_BREAK delivered to the
-        # runner cannot remove the parent before taskkill walks its descendants.
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    proc.wait()
+    spec = importlib.util.spec_from_file_location("execution_policy", pathlib.Path(__file__).with_name("execution_policy.py"))
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    policy.kill_tree(proc)
 
 
 def cancel_processes() -> None:
@@ -67,37 +63,28 @@ def run_process(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
     with PROCESS_LOCK:
         if CANCEL_REQUESTED.is_set():
             return subprocess.CompletedProcess(argv, 130, "", "")
-        proc = subprocess.Popen(argv, **kwargs, **options)
+        owned_argv = [sys.executable, '-I', str(pathlib.Path(__file__).with_name('owned_process.py')), str(os.getpid()), *argv] if sys.platform == 'linux' else argv
+        proc = subprocess.Popen(owned_argv, **kwargs, **options)
         ACTIVE_PROCESSES.add(proc)
     try:
-        stdout, stderr = proc.communicate()
+        stdout, stderr = proc.communicate(timeout=max(.01, min(1800, PLAN_DEADLINE - time.monotonic())))
         return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        stop_process_tree(proc)
+        return subprocess.CompletedProcess(argv, 124, "", "plan deadline exceeded")
     finally:
+        if proc.poll() is None:
+            stop_process_tree(proc)
         with PROCESS_LOCK:
             ACTIVE_PROCESSES.discard(proc)
 
 
 class FileLockRegistry:
-    """Per-file mutexes so disjoint single-tree packets dispatch in parallel.
+    """Deterministic lock registry for packet mutation regions.
 
-    In `--isolation none` mode a packet holds a lock on each implementation
-    path it claims across its whole dispatch+verification region, so a packet
-    never writes (or verifies) against another packet's half-applied edits to a
-    *shared* file. The overlap partition already keeps co-writing packets out of
-    the same wave, so packets that DO share a wave claim disjoint paths and thus
-    acquire disjoint lock sets — they run fully in parallel, honoring `--jobs N`.
-
-    Locks are always acquired in sorted path order to preclude deadlock, and
-    they key on the path string a packet claims (the same strings the overlap
-    partition compares), so the lock set and the partition agree by construction.
-
-    Note: this guards files a packet *claims*. A verification command that reads
-    files outside the claimed set (e.g. `go build ./...`) can still observe a
-    concurrent peer's in-flight edits to those unclaimed files; that residual is
-    inherent to running N dispatches in one working tree and is the same class of
-    cross-talk the overlap partition does not attempt to model for unclaimed
-    paths. A packet whose verification needs a fully quiescent tree should run
-    with `--jobs 1` or `--isolation worktree`.
+    Both isolation modes currently acquire the global parent-checkout key.
+    Wave partitioning preserves dependency/overlap order; workers do not perform
+    simultaneous dispatch and verification in the shared checkout.
     """
 
     def __init__(self) -> None:
@@ -447,21 +434,17 @@ Do not commit, branch, push, revert, stash, or mutate git history."""
 
 
 def run_shell(command: str, repo: pathlib.Path) -> dict[str, Any]:
-    started = time.monotonic()
-    proc = run_process(
-        [bash_executable(), "-c", command],
-        cwd=repo,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return {
-        "command": command,
-        "exit_code": proc.returncode,
-        "wall_s": round(time.monotonic() - started, 3),
-        "stdout": proc.stdout[-4000:],
-        "stderr": proc.stderr[-4000:],
-    }
+    spec = importlib.util.spec_from_file_location("execution_policy", pathlib.Path(__file__).with_name("execution_policy.py"))
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    logs = repo / ".codex-dispatch/verification" / str(time.monotonic_ns())
+    logs.mkdir(parents=True, exist_ok=True)
+    timeout = min(120, int(os.environ.get("CODEX_DISPATCH_TIMEOUT_MS", "120000")) / 1000)
+    result = policy.verify(command, repo, repo, logs / "stdout", logs / "stderr", min(timeout, PLAN_DEADLINE-time.monotonic()), cancel=CANCEL_REQUESTED, admission_lock=PROCESS_LOCK)
+    if result.get("mutations"):
+        result["exit_code"] = 66
+        result["failure_kind"] = "verification-mutated-source"
+    return result
 
 
 def write_progress_record(
@@ -754,6 +737,8 @@ def select_wave(
 
 
 def run_plan(args: argparse.Namespace) -> int:
+    global PLAN_DEADLINE
+    PLAN_DEADLINE = time.monotonic() + getattr(args, "timeout", 1800)
     CANCEL_REQUESTED.clear()
     repo = pathlib.Path(args.repo).resolve()
     plugin_root = pathlib.Path(__file__).resolve().parents[1]
@@ -774,6 +759,29 @@ def run_plan(args: argparse.Namespace) -> int:
         print(json.dumps(ledger, indent=2))
         return 2
     errors = [error for packet in packets for error in require_packet_contract(packet)]
+    identities = {}
+    for packet in packets:
+        if packet.number in identities:
+            errors.append(f"duplicate normalized packet ID {packet.number}: {identities[packet.number]} and {packet.heading}")
+        identities[packet.number] = packet.heading
+    graph = {packet.number: packet.dependencies for packet in packets}
+    visiting, visited = set(), set()
+    def visit(number):
+        if number in visiting:
+            errors.append(f"cyclic packet dependency at {number}")
+            return
+        if number in visited:
+            return
+        visiting.add(number)
+        for dependency in graph[number]:
+            if dependency not in graph:
+                errors.append(f"{identities[number]}: unknown dependency {dependency}")
+            else:
+                visit(dependency)
+        visiting.remove(number)
+        visited.add(number)
+    for number in graph:
+        visit(number)
     for packet in packets:
         for name in packet.allowed_files:
             target = repo / name
@@ -792,7 +800,7 @@ def run_plan(args: argparse.Namespace) -> int:
     conflicts = overlap_conflicts(packets)
     remaining = {packet.number for packet in packets if args.rerun or not is_done(repo, packet)}
     completed = {packet.number for packet in packets if packet.number not in remaining}
-    records: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = [{"packet": number, "status": "cached", "reason": "valid acceptance evidence"} for number in sorted(completed)]
     started = time.monotonic()
 
     def build_ledger(status: str, interrupted: bool = False) -> dict[str, Any]:
@@ -808,7 +816,8 @@ def run_plan(args: argparse.Namespace) -> int:
             ],
             "wall_s": round(time.monotonic() - started, 3),
             "packets_total": len(packets),
-            "packets_run": len([record for record in records if "packet" in record]),
+            "packets_run": len([record for record in records if "packet" in record and record.get("status") != "cached"]),
+            "packets_cached": sum(r.get("status") == "cached" for r in records),
             "packets_passed": len([record for record in records if record.get("status") == "pass"]),
             "records": records,
         }
@@ -898,7 +907,7 @@ def run_plan(args: argparse.Namespace) -> int:
                 except (ValueError, OSError):
                     pass
 
-    status = "pass" if all(record.get("status") == "pass" for record in records) and not remaining else "fail"
+    status = "pass" if all(record.get("status") in {"pass", "cached"} for record in records) and not remaining else "fail"
     # Build the final ledger exactly once: flush_ledger writes it and returns
     # the same dict we print, so the on-disk ledger.json and stdout never
     # diverge (e.g. on wall_s).
@@ -953,7 +962,10 @@ def main() -> int:
     )
     parser.set_defaults(write_progress=True)
     parser.add_argument("--rerun", action="store_true")
+    parser.add_argument("--timeout", type=float, default=1800, help="total plan wall budget in seconds")
     args = parser.parse_args()
+    if not 0 < args.timeout <= 86400:
+        parser.error("--timeout must be positive and at most 86400")
     if args.jobs < 1:
         parser.error("--jobs must be >= 1")
     return run_plan(args)

@@ -55,6 +55,10 @@ jobs:
       - name: install native shell test dependencies
         shell: bash
         run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
           if [ "$RUNNER_OS" = macOS ]; then
             brew install bash
             echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
@@ -93,8 +97,12 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
           export CODEX_DISPATCH_BIN="$PWD/codex-dispatch$suffix"
           export MSYS=winsymlinks:nativestrict
-          bats --print-output-on-failure tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > native-shell.tap
+          bats --print-output-on-failure tests/bats/launcher.bats tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > native-shell.tap
           python3 -m unittest discover -s tests/python > native-python.txt 2>&1
+      - name: Adversarial remediation regression gates
+        if: always()
+        shell: bash
+        run: python3 scripts/remediation-gates.py --out "$RUNNER_TEMP/remediation-evidence"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -103,6 +111,7 @@ jobs:
             native-tests.jsonl
             native-shell.tap
             native-python.txt
+            ${{ runner.temp }}/remediation-evidence/
 
   shell:
     runs-on: ubuntu-latest
@@ -141,7 +150,7 @@ jobs:
       - name: install bats
         run: |
           sudo apt-get update
-          sudo apt-get install -y bats
+          sudo apt-get install -y bats bubblewrap
       - name: run bats against snapshot binary
         env:
           CODEX_DISPATCH_BIN: ${{ steps.bin.outputs.path }}

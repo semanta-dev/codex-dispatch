@@ -527,9 +527,7 @@ Progress record:
 `docs/graphrag/progress/002-two.done.md`
 EOF
 
-  case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-      cat > native-interrupt.py <<'PYINTERRUPT'
+  cat > native-interrupt.py <<'PYINTERRUPT'
 import ctypes
 import os
 from pathlib import Path
@@ -540,24 +538,22 @@ import time
 
 # Give the runner a real console process group so CTRL_BREAK reaches native
 # Python. Git Bash kill uses a different PID namespace and is not equivalent.
-kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-console_pids = (ctypes.c_ulong * 1)()
-console_count = kernel.GetConsoleProcessList(console_pids, 1)
-print(f"console attachment: count={console_count}, error={ctypes.get_last_error() if not console_count else 0}", file=sys.stderr)
-if not console_count:
-    if not kernel.AllocConsole():
+if os.name == 'nt':
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    console_pids = (ctypes.c_ulong * 1)()
+    if not kernel.GetConsoleProcessList(console_pids, 1) and not kernel.AllocConsole():
         raise ctypes.WinError()
 marker = Path(".codex-dispatch/interrupt-ready").resolve()
 env = {**os.environ, "RUNNER_WINDOWS_INTERRUPT_MARKER": marker.as_posix()}
 proc = subprocess.Popen([sys.executable, *sys.argv[1:]], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                        **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}))
 try:
     deadline = time.monotonic() + 30
     while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
         time.sleep(.05)
     if not marker.exists():
         raise RuntimeError("second wave never became ready for interruption")
-    proc.send_signal(signal.CTRL_BREAK_EVENT)
+    proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
     stdout, stderr = proc.communicate(timeout=30)
     print(stdout, end="")
     print(stderr, end="", file=sys.stderr)
@@ -567,12 +563,7 @@ finally:
         proc.kill()
         proc.wait()
 PYINTERRUPT
-      run python3 native-interrupt.py "$RUNNER" docs/graphrag/plans/sigint.plan.md --out sigint-out --jobs 1 --dispatch-command "$sigint_dispatch"
-      ;;
-    *)
-      run "$RUNNER" docs/graphrag/plans/sigint.plan.md --out sigint-out --jobs 1 --dispatch-command "$sigint_dispatch"
-      ;;
-  esac
+  run python3 native-interrupt.py "$RUNNER" docs/graphrag/plans/sigint.plan.md --out sigint-out --jobs 1 --dispatch-command "$sigint_dispatch"
   # Interrupted runs return 130.
   [ "$status" -eq 130 ]
   [ -f sigint-out/ledger.json ]

@@ -707,6 +707,10 @@ func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
 	if _, err := Run(env, io.Discard, io.Discard); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	effective, err := os.ReadFile(filepath.Join(env.ResultDir, "effective-workdir.txt"))
+	if err != nil || !SameDir(strings.TrimSpace(string(effective)), sub) {
+		t.Fatalf("authoritative verification cwd = %q, err=%v, want %q", effective, err, sub)
+	}
 	assembled, err := os.ReadFile(filepath.Join(env.ResultDir, "prompt.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -812,5 +816,33 @@ func TestCancelledBrokerWithEditsCannotWriteSuccessResult(t *testing.T) {
 	}
 	if body, err := os.ReadFile(filepath.Join(repo, "partial.txt")); err != nil || string(body) != "unfinished edit\n" {
 		t.Fatal("partial edits were lost")
+	}
+}
+
+func TestEffectiveWorkdirDoesNotFollowPlantedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(outside, []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "effective-workdir.txt")
+	if err := os.Symlink(outside, target); err != nil {
+		t.Skipf("symlink privilege unavailable: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := writeEffectiveWorkdir(root, "/actual/module"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(outside)
+	if err != nil || string(got) != "preserve" {
+		t.Fatalf("outside sentinel changed: %q %v", got, err)
+	}
+	recorded, err := os.ReadFile(target)
+	if err != nil || string(recorded) != "/actual/module\n" {
+		t.Fatalf("wrong authoritative cwd: %q %v", recorded, err)
 	}
 }

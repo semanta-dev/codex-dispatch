@@ -71,7 +71,7 @@ def validate_shape(report):
         raise ValueError('pass report must have empty reason and feedback')
 
 
-def validate_result(final, prompt):
+def validate_result(final, prompt, repo=None, receipt_path=None):
     if final.get('subtype') != 'success' or final.get('is_error') or final.get('terminal_reason') != 'completed':
         raise ValueError('Claude did not complete structured review')
     report = final.get('structured_output')
@@ -79,13 +79,22 @@ def validate_result(final, prompt):
     sid = final.get('session_id', '')
     import uuid
     sid = str(uuid.UUID(sid))
-    repo = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()).resolve()
-    receipts = [path for path in (repo / '.codex-dispatch/expansions' / sid).glob('*.json') if not path.name.endswith('.runs.json')]
+    repo = Path(repo).resolve() if repo is not None else Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()).resolve()
+    receipt_root = repo / '.codex-dispatch/expansions' / sid
+    if receipt_path is not None:
+        exact = Path(receipt_path).resolve()
+        if exact.parent != receipt_root.resolve():
+            raise ValueError('receipt is outside current session')
+        receipts = [exact] if exact.is_file() else []
+    else:
+        receipts = [path for path in receipt_root.glob('*.json') if not path.name.endswith('.runs.json')]
     if len(receipts) != 1:
         raise ValueError('current command receipt missing or ambiguous')
     saved = json.loads(receipts[0].read_text())
     payload = saved['payload']
     identity = payload['identity']
+    if receipt_path is not None and receipts[0].stem != identity['prompt_id']:
+        raise ValueError('receipt does not match current prompt identity')
     raw = prompt.removeprefix('/codex-dispatch:codex ')
     if saved['status'] != 'complete' or identity != saved['identity'] or identity['session_id'] != sid or identity['args_sha256'] != hashlib.sha256(raw.encode()).hexdigest() or Path(identity['repo']).resolve() != repo:
         raise ValueError('current command receipt identity mismatch')
@@ -118,7 +127,16 @@ def validate_result(final, prompt):
         if not result['files_changed']:
             raise ValueError('pass has no meaningful changes')
         config = payload['config']
-        for label, required in [('test', payload['dispatch_env']['REVIEW_TEST_POLICY'] != 'skip' and bool(payload['dispatch_env']['REVIEW_TEST_CMD'])), ('verification', bool(config['verify_cmd']))]:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('review_evidence', ROOT / 'scripts/review-evidence.py')
+        collector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(collector)
+        if bundle.get('live_fingerprint') != collector.live_fingerprint(repo, run):
+            raise ValueError('reviewed live tree or index changed since evidence collection')
+        test_cmd = payload['dispatch_env']['REVIEW_TEST_CMD']
+        if test_cmd == '__auto__':
+            test_cmd = bundle['test_command']
+        for label, required in [('test', payload['dispatch_env']['REVIEW_TEST_POLICY'] != 'skip' and bool(test_cmd)), ('verification', bool(config['verify_cmd']))]:
             evidence = bundle.get(label)
             if required and (not isinstance(evidence, dict) or type(evidence.get('exit_code')) is not int or evidence['exit_code'] != 0):
                 raise ValueError('pass lacks successful ' + label)

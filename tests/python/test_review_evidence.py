@@ -26,6 +26,7 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.result = {"exit_code": 0, "session_id": "test", "files_changed": ["hello.txt"], "lines_added": 1, "lines_removed": 0}
         (self.run / "result.json").write_text(json.dumps(self.result))
         (self.run / "diff.patch").write_text("diff --git a/hello.txt b/hello.txt\n+hello\n")
+        (self.run / "effective-workdir.txt").write_text(str(self.repo))
         (self.run / "stdout.log").write_text("codex evidence\n")
         self.scripts = self.run / "scripts"
         self.scripts.mkdir()
@@ -38,10 +39,10 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.addCleanup(os.chdir, previous)
 
     def test_identical_checks_execute_once_and_preserve_complete_diff(self):
-        command = "printf x >> .codex-dispatch/runs/test/count"
+        command = "printf executed"
         os.environ.update(REVIEW_TEST_CMD=command, REVIEW_VERIFY_CMD=command)
         bundle = MODULE.collect()
-        self.assertEqual((self.run / "count").read_text(), "x")
+        self.assertEqual(bundle["test"]["stdout"], "executed")
         self.assertTrue(bundle["verification"]["reused_test_execution"])
         self.assertEqual(bundle["diff"], (self.run / "diff.patch").read_text())
         self.assertEqual(bundle["changed_file_facts"]["hello.txt"]["kind"], "file")
@@ -55,7 +56,8 @@ class ReviewEvidenceTests(unittest.TestCase):
     def test_staging_then_unstaging_is_still_detected(self):
         os.environ.update(REVIEW_TEST_CMD="git add hello.txt", REVIEW_VERIFY_CMD="git rm --cached hello.txt")
         bundle = MODULE.collect()
-        self.assertIn(".git/index", bundle["verification_mutations"])
+        self.assertNotEqual(bundle["test"]["exit_code"], 0)
+        self.assertEqual(subprocess.check_output(["git", "ls-files", "--stage"]), b"")
 
     def test_failing_check_is_not_success(self):
         os.environ["REVIEW_VERIFY_CMD"] = "printf diagnostic >&2; exit 7"
@@ -66,6 +68,9 @@ class ReviewEvidenceTests(unittest.TestCase):
     def test_clean_verification_preserves_arguments_and_shell_semantics(self):
         source = Path(__file__).resolve().parents[2] / "scripts/clean-verify.sh"
         shutil.copy2(source, self.scripts / "clean-verify.sh")
+        shutil.copy2(source.with_name("execution_policy.py"), self.scripts / "execution_policy.py")
+        shutil.copy2(source.with_name("clean_verify.py"), self.scripts / "clean_verify.py")
+        shutil.copy2(source.with_name("owned_process.py"), self.scripts / "owned_process.py")
         (self.repo / "README.md").write_text("base\n")
         subprocess.run(["git", "add", "README.md"], check=True)
         subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "base"], check=True)
@@ -99,6 +104,29 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(mode["result"]["lines_added"], 0)
         self.assertIn("new mode 100755", mode["diff"])
 
+    def test_effective_module_detection_uses_recorded_dispatch_scope(self):
+        module = self.repo / 'module with spaces'
+        module.mkdir()
+        (self.repo / 'Makefile').write_text('test:\n\t@true\n')
+        (module / 'Makefile').write_text('test:\n\t@echo module-ran; exit 7\n')
+        (self.run / 'effective-workdir.txt').write_text(str(module))
+        os.environ.update(REVIEW_TEST_CMD='__auto__', CODEX_WORKDIR=str(self.repo))
+        bundle = MODULE.collect()
+        self.assertEqual(bundle['effective_workdir'], str(module))
+        self.assertEqual(bundle['test_command'], 'make test')
+        self.assertNotEqual(bundle['test']['exit_code'], 0)
+        self.assertIn('module-ran', bundle['test']['stdout'])
+
+    def test_drift_during_verification_never_becomes_trusted_baseline(self):
+        os.environ['REVIEW_TEST_CMD'] = 'true'
+        def external_edit(*args):
+            (self.repo / 'hello.txt').write_text('unreviewed')
+            return {'exit_code': 0, 'mutations': []}
+        with patch.object(MODULE, 'check', side_effect=external_edit):
+            bundle = MODULE.collect()
+        self.assertIn('live-tree-drift', bundle['verification_mutations'])
+        self.assertNotEqual(bundle['live_fingerprint'], MODULE.live_fingerprint(self.repo, self.run))
+
     def test_boolean_exit_code_is_invalid(self):
         self.result["exit_code"] = False
         (self.run / "result.json").write_text(json.dumps(self.result))
@@ -116,6 +144,7 @@ class ReviewEvidenceTests(unittest.TestCase):
         os.environ["REVIEW_VERIFY_CMD"] = "touch must-not-exist"
         bundle = MODULE.collect()
         self.assertEqual(bundle["result"]["exit_code"], 1)
+        self.assertEqual(json.loads((self.run / "review-evidence.json").read_text()), bundle)
         self.assertFalse((self.repo / "must-not-exist").exists())
 
 class ReceiptChainTests(unittest.TestCase):
