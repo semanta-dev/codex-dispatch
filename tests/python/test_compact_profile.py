@@ -12,6 +12,28 @@ SPEC.loader.exec_module(PROFILE)
 
 
 class CompactProfileTests(unittest.TestCase):
+    def test_schema_routes_follow_hook_parser_semantics(self):
+        for raw in ['--list', '--status task-id', '--cancel task-id', '--detach build']:
+            with self.subTest(raw=raw):
+                self.assertTrue(PROFILE.is_background(raw))
+        for raw in ['explain --list', '-- "--list"', '--acceptance "mention --detach" build']:
+            with self.subTest(raw=raw):
+                self.assertFalse(PROFILE.is_background(raw))
+        for raw in ['--list --detach', '--status', '--max-iter 11 build']:
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                PROFILE.is_background(raw)
+
+    def test_vendor_schema_has_supported_root_and_exact_route_fields(self):
+        import json
+        for background, fields in [(False, set(PROFILE.REPORT_FIELDS)), (True, {'kind', 'output'})]:
+            command = PROFILE.command('stream-json', background)
+            schema = json.loads(command[command.index('--json-schema') + 1])
+            self.assertEqual(schema['type'], 'object')
+            self.assertFalse(set(schema) & {'oneOf', 'anyOf', 'allOf'})
+            self.assertEqual(set(schema['properties']), fields)
+            self.assertEqual(set(schema['required']), fields)
+            self.assertFalse(schema['additionalProperties'])
+
     def test_task_roundtrips_as_data_and_profile_is_child_local(self):
         args = ['--acceptance', 'literal $(touch sentinel)', 'keep quotes: \' " and\nnewline']
         process = Mock(stdout=iter([]))

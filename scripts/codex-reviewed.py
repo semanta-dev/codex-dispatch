@@ -25,11 +25,22 @@ REPORT_FIELDS = {
     'fell_back_to_fresh': {'type': 'boolean'},
     'feedback': {'type': 'array', 'maxItems': 8, 'items': {'type': 'string', 'maxLength': 1000}},
 }
-REPORT_SCHEMA = {'type': 'object', 'oneOf': [
-    {'properties': REPORT_FIELDS, 'required': list(REPORT_FIELDS), 'additionalProperties': False},
-    {'properties': {'kind': {'const': 'background'}, 'output': {'type': 'string'}},
-     'required': ['kind', 'output'], 'additionalProperties': False},
-]}
+REPORT_SCHEMA = {'type': 'object', 'properties': REPORT_FIELDS,
+                 'required': list(REPORT_FIELDS), 'additionalProperties': False}
+BACKGROUND_SCHEMA = {'type': 'object',
+                     'properties': {'kind': {'const': 'background'}, 'output': {'type': 'string'}},
+                     'required': ['kind', 'output'], 'additionalProperties': False}
+
+
+def is_background(raw_arguments):
+    # Share the hook's parsing semantics, including quoted values and the task
+    # remainder. A flag mentioned in a task must not select another route.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('codex_expansion', ROOT / 'scripts/hooks/codex-expansion.py')
+    expansion = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(expansion)
+    config = expansion.parse(raw_arguments)
+    return any(config[key] for key in ['detach', 'list', 'status', 'cancel'])
 
 
 def validate_shape(report):
@@ -126,12 +137,12 @@ def render(report):
         f"- run artifacts: {report['run_dir']}", *report['feedback']])
 
 
-def command(output_format):
+def command(output_format, background=False):
     argv = ['claude', '--print', '--model', MODEL, '--plugin-dir', str(ROOT),
             '--system-prompt-file', str(ROOT / 'scripts/compact-review-system.md'),
             '--tools', 'Skill,Bash,Read,Grep,Glob', '--strict-mcp-config', '--setting-sources', '',
             '--permission-mode', 'dontAsk', '--allowedTools', 'Skill', 'Bash', 'Read', 'Grep', 'Glob',
-            '--output-format', output_format, '--json-schema', json.dumps(REPORT_SCHEMA)]
+            '--output-format', output_format, '--json-schema', json.dumps(BACKGROUND_SCHEMA if background else REPORT_SCHEMA)]
     if output_format == 'stream-json':
         argv.append('--verbose')
     return argv
@@ -159,7 +170,11 @@ def main():
     # Claude's structured result is validated before human-readable success.
     # Streaming mode preserves the raw vendor evidence; callers must also check
     # this process's exit status and the final local validation event.
-    proc = subprocess.Popen(command('stream-json'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=environment())
+    try:
+        background = is_background(prompt.removeprefix('/codex-dispatch:codex '))
+    except ValueError as error:
+        parser.error(str(error))
+    proc = subprocess.Popen(command('stream-json', background), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=environment())
     proc.stdin.write(prompt)
     proc.stdin.close()
     final = {}

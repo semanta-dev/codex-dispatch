@@ -298,3 +298,14 @@ terminates/drains active process trees before exit 130, and blocks new launches
 and progress writes after cancellation. Local tests retain a real sleeping
 child and test cancellation during process launch. All 45 Python tests and 15
 plan-runner shell cases pass; native confirmation remains required.
+
+### Vendor schema compatibility repair
+
+The excluded v7 smoke at `/tmp/plan-a-paired-smoke-v7` failed because the
+real Anthropic API rejects top-level `oneOf` in tool schemas. Codex work
+and failed trial costs remain archived; the short failed timings earn no
+acceptance credit. The fake API probes did not validate vendor compatibility.
+The public launcher now selects an ordinary root-object review or background
+schema using the hook's shared argument parser before launching Claude. Strict
+local report, receipt and retry-ledger validation is unchanged. A new two-trial
+transport smoke must establish real API acceptance before an all-six smoke.
