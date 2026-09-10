@@ -89,7 +89,36 @@ def command_loaded(transcripts, contract_digest):
     return invoked and expanded
 
 
-def claude_evidence(trial, direct_route=False):
+def expansion_receipt(trial, transcripts, sid):
+    paths = list((trial / "repo/.codex-dispatch/expansions").glob("*/*.json"))
+    if len(paths) != 1:
+        raise ValueError("exactly one current expansion receipt required")
+    saved = read(paths[0])
+    payload = saved["payload"]
+    identity = payload["identity"]
+    invocation = (trial / "attempt-1.input.txt").read_text()
+    args = invocation.removeprefix("/codex-dispatch:codex ")
+    if saved["status"] != "complete" or identity != saved["identity"] or identity["session_id"] != sid or identity["args_sha256"] != hashlib.sha256(args.encode()).hexdigest() or Path(identity["repo"]).resolve() != (trial / "repo").resolve():
+        raise ValueError("expansion receipt identity mismatch")
+    if payload["kind"] != "review" or payload["iteration"] != 1 or payload["config"]["max_iter"] != 3:
+        raise ValueError("expansion receipt route/retry policy mismatch")
+    run = Path(payload["run_dir"])
+    if run.parent.resolve() != (trial / "repo/.codex-dispatch/runs").resolve() or read(run / "review-evidence.json") != payload["bundle"] or payload["codex_session"] != payload["bundle"]["result"]["session_id"]:
+        raise ValueError("expansion receipt not bound to first dispatch evidence")
+    invocation_events = [e for e in transcripts if e.get("type") == "user" and isinstance(e.get("message", {}).get("content"), str) and "<command-name>/codex-dispatch:codex</command-name>" in e["message"]["content"]]
+    if not invocation_events or any(e.get("promptId") != identity["prompt_id"] for e in invocation_events):
+        raise ValueError("expansion prompt identity unproven")
+    # Require delivery through the hook before any reviewer model message.
+    for event in transcripts:
+        attachment = event.get("attachment", {})
+        if "CODEX_EXPANSION_RECEIPT" in json.dumps(attachment) and identity["prompt_id"] in json.dumps(attachment):
+            return
+        if event.get("type") == "assistant":
+            break
+    raise ValueError("current receipt not delivered before reviewer inference")
+
+
+def claude_evidence(trial, direct_route=False, compact=False):
     stream = events(trial / "attempt-1.stdout.jsonl")
     reports = [e for e in stream if e.get("type") == "result"]
     final = reports[-1] if reports else {}
@@ -101,12 +130,15 @@ def claude_evidence(trial, direct_route=False):
     sources = list((Path.home() / ".claude/projects").glob(f"*/{sid}.jsonl"))
     sources += list((Path.home() / ".claude/projects").glob(f"*/{sid}/subagents/*.jsonl"))
     transcripts = list(stream)
+    persisted = []
     review_texts = []
     for source in sources:
         target = archives / source.name
         target.write_bytes(source.read_bytes())
         data = events(source)
         transcripts.extend(data)
+        if source.name == sid + ".jsonl":
+            persisted.extend(data)
         meta = source.with_suffix(".meta.json")
         if meta.exists() and read(meta).get("agentType") == "codex-dispatch:codex-orchestrator":
             (archives / meta.name).write_bytes(meta.read_bytes())
@@ -125,10 +157,22 @@ def claude_evidence(trial, direct_route=False):
         review_texts = [final.get("result", "")] if reports else []
     issues = []
     if direct_route:
-        digest = read(trial.parent / "candidate-source-sha256.json").get("agents/codex-orchestrator.md")
+        hashes = read(trial.parent / "candidate-source-sha256.json")
+        digest = hashes.get("scripts/direct-review-contract.md", hashes.get("agents/codex-orchestrator.md"))
         if not command_loaded(transcripts, digest):
             issues.append("persisted command/expanded contract unproven")
+        if "scripts/direct-review-contract.md" in hashes:
+            try:
+                expansion_receipt(trial, persisted, sid)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                issues.append("hook route unproven: " + str(error))
     model_usage = final.get("modelUsage", {})
+    if compact:
+        if any(u.get("thinkingTokens", 0) != 0 for u in model_usage.values()) or any(block.get("type") in {"thinking", "redacted_thinking"} for event in transcripts for block in event.get("message", {}).get("content", []) if isinstance(block, dict)):
+            issues.append("compact reviewer thinking was not disabled")
+        command = read(trial / "attempt-1.command.json")
+        if len(command) != 5 or not command[1].endswith("/scripts/codex-reviewed.py") or command[2:] != ["--output-format", "stream-json", "--stdin-request"]:
+            issues.append("shipped compact entrypoint unproven")
     for raw, aggregate in [("input_tokens", "inputTokens"), ("output_tokens", "outputTokens"), ("cache_read_input_tokens", "cacheReadInputTokens"), ("cache_creation_input_tokens", "cacheCreationInputTokens")]:
         if sum(u.get(raw, 0) for u in unique.values()) != sum(u.get(aggregate, 0) for u in model_usage.values()):
             issues.append("Claude usage reconciliation: " + raw)
@@ -204,7 +248,8 @@ def accounting(trial, entry, inventory, module, rates):
     final, reviews = {}, []
     if entry["arm"] == "plugin":
         try:
-            final, reviews, claude_cost, extra = claude_evidence(trial, getattr(module, "REVIEW_ROUTE", "delegated") == "direct-command")
+            route = getattr(module, "REVIEW_ROUTE", "delegated")
+            final, reviews, claude_cost, extra = claude_evidence(trial, route in {"direct-command", "hook-command", "compact-hook-command"}, route == "compact-hook-command")
             issues.extend(extra)
         except Exception as error:
             claude_cost = None
@@ -261,7 +306,7 @@ def audit_trial(out, entry, inventory, module, rates):
         if score.get("policy_errors"):
             violations.append("effective_policy_mismatch")
         if entry["arm"] == "plugin":
-            if getattr(module, "REVIEW_ROUTE", "delegated") == "direct-command":
+            if getattr(module, "REVIEW_ROUTE", "delegated") in {"direct-command", "hook-command", "compact-hook-command"}:
                 if final.get("subagent_stats", {}).get("spawned", 0) != 0:
                     failures.append("unexpected Claude delegation")
                 invocation = (trial / "attempt-1.input.txt").read_text()

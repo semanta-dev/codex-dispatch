@@ -24,7 +24,7 @@ os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 MODEL = "gpt-5.5"
 ROUTER = "claude-haiku-4-5-20251001"
-REVIEW_ROUTE = "direct-command"
+REVIEW_ROUTE = "compact-hook-command"
 CASES = {
     "C01": ("Create hello.txt containing exactly hello followed by a newline.", ["hello.txt"]),
     "C02": ("Append task followed by a newline to notes.txt. Preserve every existing byte.", ["notes.txt"]),
@@ -137,7 +137,7 @@ def freeze(out, pricing_source):
     product_hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in git(ROOT, "ls-files", "-z").decode().split("\0") if name and (ROOT / name).is_file()}
     dump(out / "candidate-source-sha256.json", product_hashes)
     manifest = {"version": 1, "candidate": git(ROOT, "rev-parse", "HEAD").decode().strip(),
-                "model": MODEL, "reasoning": "medium", "router_model": ROUTER, "review_route": REVIEW_ROUTE, "router_effort": "low", "claude_tools": ["Skill", "Bash", "Read", "Grep", "Glob"],
+                "model": MODEL, "reasoning": "medium", "router_model": ROUTER, "review_route": REVIEW_ROUTE, "router_thinking_tokens": 0, "review_system_sha256": hashlib.sha256((ROOT / "scripts/compact-review-system.md").read_bytes()).hexdigest(), "entrypoint": "scripts/codex-reviewed.py", "claude_tools": ["Skill", "Bash", "Read", "Grep", "Glob"],
                 "sandbox": "workspace-write", "approval": "never", "mcp": "none",
                 "max_attempts": 3, "timeout_seconds_per_trial": 600,
                 "retry_policy": "direct explicit resume with deterministic oracle feedback; plugin advertised inline review loop",
@@ -209,9 +209,7 @@ def execute(out, limit):
         try:
             for attempt in range(1, 4):
                 if entry["arm"] == "plugin":
-                    command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model", ROUTER,
-                               "--plugin-dir", str(ROOT), "--tools", "Skill,Bash,Read,Grep,Glob", "--effort", "low", "--strict-mcp-config", "--setting-sources", "", "--permission-mode", "dontAsk",
-                               "--allowedTools", "Skill", "Bash", "Read", "Grep", "Glob"]
+                    command = [sys.executable, str(ROOT / "scripts/codex-reviewed.py"), "--output-format", "stream-json", "--stdin-request"]
                     prompt = (trial / "plugin-prompt.txt").read_text()
                 else:
                     command = ["codex", "exec", "--json", "-m", MODEL, "-c", 'approval_policy="never"']

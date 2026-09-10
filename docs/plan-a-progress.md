@@ -230,3 +230,26 @@ The auditor now retains failed-attempt spend, unknown-cost vetoes, all planned
 rows and typed safety violations, and verifies actual contract expansion.
 Median individual task cost is diagnostic; the fixed economic gate remains
 total model spend divided by accepted tasks, at most 1.25x direct.
+
+### Deterministic command entry and compact-profile candidate
+
+The installed Claude 2.1.266 probe confirmed UserPromptExpansion receives
+literal argument text through JSON stdin and can block before any inference.
+The hook now dispatches before Haiku review and injects an identity-bound
+receipt. Exclusive creation prevents duplicate execution; failed/pending
+receipts cannot be silently retried. Complete hook smoke v5 passed all twelve
+independent audits but failed economics (see benchmark protocol).
+
+The next measured candidate is the shipped compact-review launcher, approved
+by the CTO before measurement with all gates unchanged. It disables Haiku
+thinking only in its child process and uses a review-only system role. A new
+immutable fixture harness measures the exact deployed rubric on that model and
+configuration. Pure-function/static criteria are distinguished from runtime
+integrations, matching the standalone reviewer's existing rule.
+
+Hosted run 34420880831 passed Go/race/lint and all Linux/macOS native gates.
+Both Windows architectures passed native Go and 90/91 shell cases. The remaining
+interruption fixture failed because AllocConsole was called after a zero window
+handle and returned access denied. The next correction uses the console process
+list to detect attachment; the headless-console explanation remains a hypothesis
+until native validation. No interruption test was skipped or weakened.

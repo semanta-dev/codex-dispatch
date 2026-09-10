@@ -136,3 +136,33 @@ python3 /path/to/new-archive/audit.py /path/to/new-archive /path/to/private-pinn
 `--limit` marks a partial smoke, never a promotion cohort. The original seven
 reviewer fixtures remain mandatory; binary-deletion and mode-only fixtures add
 coverage without replacing any original denominator.
+
+## Compact review configuration, approved before measurement
+
+The CTO accepted `python3 scripts/codex-reviewed.py` as the Plan A candidate
+entrypoint before its first measurement. It invokes the actual plugin command
+and UserPromptExpansion hook, pins Haiku 4.5 with `MAX_THINKING_TOKENS=0`, and
+replaces the general coding-agent system role with the shipped independent
+review role in `scripts/compact-review-system.md`. It does not use `--bare`,
+which would disable plugin hooks. No global settings are changed. Qualification
+covers this documented profile; it does not make a latency/cost claim for an
+existing Claude session using its own thinking settings.
+
+All original gates and the fixed corpus remain unchanged. The benchmark calls
+the shipped entrypoint, freezes profile/contract/system hashes and records its
+configuration. Receipt auditing proves current prompt/session/arguments,
+pre-inference evidence delivery, first-run binding, and all final patch/run
+attribution. Thinking-token usage must be zero in the compact configuration.
+
+`tests/reviewer/direct-fixtures.py` freezes the exact deployed review-check
+section, compact system role, model/configuration and a single-decision adapter.
+It evaluates all nine original fixtures ten times, retaining every response and
+requiring at least eight matches per fixture. Expected verdict/reason pairs are
+unchanged. This isolates review classification from retry-control outcomes;
+the actual paired slash route separately validates orchestration. Standalone
+Sonnet scores do not substitute for this Haiku decision-quality gate.
+
+Hook smoke v5 accepted all six cases per arm. Its median latency was 39.885s
+versus 22.599s direct; total model spend was $0.9191848 versus $0.732622. It
+failed economics and remains excluded from promotion. Complete evidence:
+`/tmp/plan-a-paired-smoke-v5`.

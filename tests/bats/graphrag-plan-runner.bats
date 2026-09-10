@@ -540,8 +540,11 @@ import time
 
 # Give the runner a real console process group so CTRL_BREAK reaches native
 # Python. Git Bash kill uses a different PID namespace and is not equivalent.
-kernel = ctypes.windll.kernel32
-if not kernel.GetConsoleWindow():
+kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+console_pids = (ctypes.c_ulong * 1)()
+console_count = kernel.GetConsoleProcessList(console_pids, 1)
+print(f"console attachment: count={console_count}, error={ctypes.get_last_error() if not console_count else 0}", file=sys.stderr)
+if not console_count:
     if not kernel.AllocConsole():
         raise ctypes.WinError()
 marker = Path(".codex-dispatch/interrupt-ready").resolve()

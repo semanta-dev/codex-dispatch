@@ -29,7 +29,7 @@ codex --version   # must report >= 0.130.0
 /codex add a --json flag to cmd/list that prints the results as a JSON array
 ```
 
-`/codex` derives acceptance criteria, asks Codex to implement, reviews the diff directly with Claude Haiku, and iterates until it passes or hits the iteration cap.
+`/codex` dispatches through a command-expansion hook before Claude inference, then reviews the completed evidence with Haiku and iterates within the requested cap. Supply explicit acceptance criteria for precise review; otherwise the task itself is the acceptance requirement.
 
 **4. Read the result.** A successful run ends with a block like:
 
@@ -389,3 +389,27 @@ Reviewer-subagent fixtures live under `tests/fixtures/reviewer/` and are exercis
 ## License
 
 MIT
+
+### Compact independent-review profile
+
+For an isolated review session with thinking disabled, run:
+
+```sh
+python3 scripts/codex-reviewed.py --files src/hello.py --acceptance 'hello() returns Hello' 'Implement hello()'
+```
+
+This public entrypoint loads the real plugin command and hooks, pins Haiku 4.5,
+uses a short review-only system prompt, and sets `MAX_THINKING_TOKENS=0` only for
+its child Claude process. It enables only Skill/Bash/Read/Grep/Glob, uses
+`dontAsk` tool permissions and excludes configured MCP servers and settings
+sources. It does not change persistent settings. Requires Claude Code with
+`UserPromptExpansion` support (validated on 2.1.266), Python 3, Git, Git Bash on
+Windows, and the existing Codex setup. All `/codex` task flags are supported;
+`--max-iter` is bounded to 1–10 (default 3). For automation, `--stdin-request`
+reads a complete `/codex-dispatch:codex ...` invocation, and `--output-format`
+selects text, json or stream-json.
+
+Plan A latency/cost qualification applies only to this compact profile after
+its benchmark gates pass. An existing-session `/codex` invocation inherits the
+session's thinking configuration and has no equivalent performance claim.
+Haiku does not support effort controls; `effort: low` is not a thinking limit.
