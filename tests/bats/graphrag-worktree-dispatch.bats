@@ -187,8 +187,21 @@ EOF
     "$SCRIPT" > second.out 2> second.err
   ) &
   pid2=$!
-  wait "$pid1"
-  wait "$pid2"
+  rc1=0
+  rc2=0
+  wait "$pid1" || rc1=$?
+  wait "$pid2" || rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    printf 'parallel dispatch exit codes: first=%s second=%s\n' "$rc1" "$rc2" >&2
+    cat first.err second.err >&2
+    for diagnostic in .codex-dispatch/graphrag-worktree-runs/*/worktree-add-*.err; do
+      [ -f "$diagnostic" ] || continue
+      printf '%s\n' "$diagnostic" >&2
+      cat "$diagnostic" >&2
+    done
+  fi
+  [ "$rc1" -eq 0 ]
+  [ "$rc2" -eq 0 ]
 
   [ "$(cat docs/one.md)" = "one" ]
   [ "$(cat docs/two.md)" = "two" ]

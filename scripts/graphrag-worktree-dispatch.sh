@@ -195,7 +195,12 @@ selected_attempt=0
 for attempt in $(seq 1 "$dispatch_attempts"); do
   attempt_worktree="$work_root/$run_id-a$attempt"
   worktrees+=("$attempt_worktree")
-  git -C "$parent" worktree add --detach "$attempt_worktree" "$base" > "$run_dir/worktree-add-$attempt.out" 2> "$run_dir/worktree-add-$attempt.err"
+  worktree_rc=0
+  git -C "$parent" worktree add --detach "$attempt_worktree" "$base" > "$run_dir/worktree-add-$attempt.out" 2> "$run_dir/worktree-add-$attempt.err" || worktree_rc=$?
+  if [ "$worktree_rc" -ne 0 ]; then
+    cat "$run_dir/worktree-add-$attempt.err" >&2
+    exit "$worktree_rc"
+  fi
 
   seed_file="$run_dir/seeded-inputs-$attempt.tsv"
   : > "$seed_file"
