@@ -401,7 +401,7 @@ def audit_trial(out, entry, inventory, module, rates):
 def aggregate(results, summary):
     for arm in ["direct", "plugin"]:
         selected = [v for k, v in results.items() if k.endswith(arm)]
-        accepted = [v for v in selected if v["accepted"]]
+        accepted = [v for v in selected if v["accepted"] and nonnegative(v.get('human_code_repair_minutes')) and v['human_code_repair_minutes'] == 0]
         cost_complete = all(v["cost_complete"] for v in selected)
         latencies = sorted(v['seconds'] for v in accepted)
         observed = [v for v in selected if v.get('seconds') is not None]

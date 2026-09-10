@@ -12,7 +12,7 @@ SPEC.loader.exec_module(AUDIT)
 class BenchmarkGateTests(unittest.TestCase):
     def cohort(self):
         return {f"C{case:02}-{rep}-{arm}": {"accepted": True, "failures": [], "safety_violations": [], "seconds": 10,
-                "cost_complete": True, "total_cost_equivalent_usd": 1, "known_cost_equivalent_usd": 1}
+                "cost_complete": True, "total_cost_equivalent_usd": 1, "known_cost_equivalent_usd": 1, "human_code_repair_minutes": 0}
                 for case in range(1, 7) for rep in range(1, 6) for arm in ["direct", "plugin"]}
 
     def score(self, results, full=True):
@@ -48,6 +48,15 @@ class BenchmarkGateTests(unittest.TestCase):
 
     def test_incomplete_cohort_marker_never_promotes(self):
         self.assertFalse(self.score(self.cohort(), full=False)["paired_go"])
+
+    def test_human_repaired_or_unknown_rows_do_not_count_as_accepted(self):
+        rows = self.cohort()
+        rows['C01-1-plugin']['human_code_repair_minutes'] = 2
+        del rows['C01-2-plugin']['human_code_repair_minutes']
+        result = self.score(rows)
+        self.assertEqual(result['arms']['plugin']['accepted'], 28)
+        self.assertAlmostEqual(result['arms']['plugin']['cost_per_accepted_including_failures'], 30 / 28)
+        self.assertFalse(result['gates']['accepted_count'])
 
     def test_tail_tokens_and_human_repairs_include_rejected_attempts(self):
         rows = self.cohort()

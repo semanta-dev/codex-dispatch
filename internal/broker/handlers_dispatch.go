@@ -191,7 +191,7 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 
 	srv, err := state.EnsureAppServer(ctx)
 	if err != nil {
-		return dispatchFailure(state, logW, taskID, fmt.Sprintf("ensure codex app-server: %v", err), emit)
+		return dispatchFailure(ctx, state, logW, taskID, fmt.Sprintf("ensure codex app-server: %v", err), emit)
 	}
 
 	// Sandbox preflight: on a host whose bubblewrap Linux sandbox can't start,
@@ -199,11 +199,11 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 	// but every shell command fails with a cryptic `bwrap: ...` line buried in
 	// per-command output. Fail fast with an actionable message instead.
 	if msg := preflightSandbox(ctx, srv, p.Sandbox); msg != "" {
-		return dispatchFailure(state, logW, taskID, msg, emit)
+		return dispatchFailure(ctx, state, logW, taskID, msg, emit)
 	}
 	if p.policy != nil {
 		if err := p.policy.validate(ctx, &p); err != nil {
-			return dispatchFailure(state, logW, taskID, "execution policy changed before turn: "+err.Error(), emit)
+			return dispatchFailure(ctx, state, logW, taskID, "execution policy changed before turn: "+err.Error(), emit)
 		}
 	}
 
@@ -231,13 +231,13 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 			t, rerr = srv.StartThread(ctx, threadOpts)
 		}
 		if rerr != nil {
-			return dispatchFailure(state, logW, taskID, fmt.Sprintf("acquire thread: %v", rerr), emit)
+			return dispatchFailure(ctx, state, logW, taskID, fmt.Sprintf("acquire thread: %v", rerr), emit)
 		}
 		thread = t
 	} else {
 		t, terr := srv.StartThread(ctx, threadOpts)
 		if terr != nil {
-			return dispatchFailure(state, logW, taskID, fmt.Sprintf("start thread: %v", terr), emit)
+			return dispatchFailure(ctx, state, logW, taskID, fmt.Sprintf("start thread: %v", terr), emit)
 		}
 		thread = t
 	}
@@ -265,7 +265,7 @@ func runDispatchOn(ctx context.Context, state *BrokerState, taskID string, p Dis
 
 	handle, err := srv.StartTurn(ctx, thread.ID, p.Prompt, appserver.TurnStartOptions{})
 	if err != nil {
-		return dispatchFailure(state, logW, taskID, fmt.Sprintf("start turn: %v", err), emit)
+		return dispatchFailure(ctx, state, logW, taskID, fmt.Sprintf("start turn: %v", err), emit)
 	}
 	// Register the handle so task.cancel (cancelTask) can interrupt THIS turn
 	// (turn/interrupt + channel close) rather than only cancelling a ctx the
@@ -535,10 +535,15 @@ func turnToExit(turn *appserver.Turn) (int, string) {
 	}
 }
 
-// dispatchFailure marks the task errored, emits a synthetic broker error
-// notification into stdout.log, and returns a DispatchRunResult with exit
-// 64. Callers should return this directly.
-func dispatchFailure(state *BrokerState, logW *LogWriter, taskID, msg string, emit func(string, any)) DispatchRunResult {
+// dispatchFailure records setup/RPC failure or lifecycle cancellation and
+// returns the canonical terminal outcome. Deadline expiry remains an error.
+func dispatchFailure(ctx context.Context, state *BrokerState, logW *LogWriter, taskID, msg string, emit func(string, any)) DispatchRunResult {
+	// Shutdown cancels the lifecycle context without necessarily transitioning
+	// the table first. Preserve any prior terminal outcome; otherwise record
+	// cancellation before handling the interrupted RPC as an ordinary failure.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		_ = state.Table.MarkCancelled(taskID, 64)
+	}
 	if err := state.Table.MarkErrored(taskID, 64, msg); err != nil {
 		// Cancellation or another terminal transition can win while an RPC
 		// (notably turn/start) is returning an error. Report the recorded

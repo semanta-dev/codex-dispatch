@@ -945,7 +945,9 @@ func TestDispatchFailurePreservesExistingTerminalState(t *testing.T) {
 			}
 			defer log.Close()
 			var events []string
-			result := dispatchFailure(state, log, id, "start turn: context canceled", func(kind string, _ any) { events = append(events, kind) })
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			result := dispatchFailure(ctx, state, log, id, "start turn: context canceled", func(kind string, _ any) { events = append(events, kind) })
 			if result.State != string(before.State) || result.ExitCode != before.ExitCode {
 				t.Fatalf("wire state=%s exit=%d, recorded state=%s exit=%d", result.State, result.ExitCode, before.State, before.ExitCode)
 			}
@@ -955,6 +957,43 @@ func TestDispatchFailurePreservesExistingTerminalState(t *testing.T) {
 			}
 			if terminal == StateErrored && result.ErrorMessage != "original failure" {
 				t.Fatalf("original failure replaced: %q", result.ErrorMessage)
+			}
+		})
+	}
+}
+
+func TestDispatchSetupFailureClassifiesContextCancellation(t *testing.T) {
+	for _, cancelled := range []bool{true, false} {
+		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+			state := &BrokerState{Table: NewTable(1, 64)}
+			id, _ := state.Table.Start("claude-session", TaskParams{Mode: "fresh"})
+			if err := state.Table.MarkRunning(id); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			if cancelled {
+				cancel()
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			}
+			defer cancel()
+			log, err := OpenLogWriter(filepath.Join(t.TempDir(), "stdout.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer log.Close()
+			var events []string
+			result := dispatchFailure(ctx, state, log, id, "interrupted setup RPC", func(kind string, _ any) { events = append(events, kind) })
+			want, event := StateErrored, "task.errored"
+			if cancelled {
+				want, event = StateCancelled, "task.cancelled"
+			}
+			recorded, _ := state.Table.Status(id)
+			if result.State != string(want) || recorded.State != want || result.ExitCode == 0 || recorded.ExitCode != result.ExitCode {
+				t.Fatalf("result=%+v recorded=%+v want=%s", result, recorded, want)
+			}
+			if len(events) != 1 || events[0] != event {
+				t.Fatalf("events=%v want=%s", events, event)
 			}
 		})
 	}
