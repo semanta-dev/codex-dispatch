@@ -71,6 +71,31 @@ claim completed native qualification or authorize release.
 
 ## Automated workflows
 
+### Retained native checkpoints
+
+These are separate development candidates and cannot be combined into a final
+same-candidate promotion matrix.
+
+| Candidate / run | Observed result | Remaining limitation |
+| --- | --- | --- |
+| `cad8873`, CI `34440104903` | Linux amd64 native job passed; both Linux architectures passed ten development suites after targeted AppArmor provisioning | ARM shell interruption test exposed a cleanup race in the test; generated files dirtied the checkout |
+| `a63d084`, CI `34440640315` | Linux arm64 native job passed with unchanged clean source | Linux amd64 twice exceeded the existing three-second hang/noisy bound; command/cleanup diagnostics added, budget unchanged |
+| `cad8873`, probe `34440086262` | Seven actual HANDLE boundary tests passed on Windows amd64 and arm64 | Go standard-library file I/O and MSYS Bash fail inside LPAC |
+| `63f25ae`, probe `34440756624` | Raw Windows denial and breakaway controls passed on both architectures; ARM64 supervisor-death cleanup passed | amd64 lifecycle remains unresolved; raw Win32 probes do not establish Go/Bash compatibility |
+| `a360d5c`, probe `34440949149` | Six bounded Windows evidence integration tests passed on both architectures, including static no-tests collection, symlink parity, drift and a stalled-reader timeout | Full Windows verification remains unsupported |
+| `a360d5c`, probe `34440949208` | Retained native macOS crash reports and fixed `/bin/sh` and `/usr/bin/true` startup failures on both architectures | No child boundary or lifecycle pass; literal-root startup experiment pending |
+
+The CTO rejected the initial Windows worker pipe protocol because Windows can
+block in a synchronous stdin write before `communicate(timeout)` begins its
+timed wait. Requests now use a bounded temporary input file and a timed wait
+with direct kill/reap. A one-MiB request to a child that never reads exercises
+the original deadlock condition; this regression passed natively.
+
+The Linux amd64 timing failure did not reproduce in thirty local trials
+(worst observed 1.335 seconds). Diagnostics now include command, owner exit,
+cleanup duration and remaining process identities on a drain timeout. No
+timeout assertion or production deadline was raised to obtain a pass.
+
 - `scripts/remediation-gates.py --out <directory-outside-repository>` runs development regressions,
   archives commands/log hashes and a source manifest, and invalidates evidence
   if HEAD/index/files change during the run. It never generates approval.

@@ -14,8 +14,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func write(path, value string) {
@@ -33,6 +36,20 @@ func child(args []string) int {
 		checks["positive_write"] = os.WriteFile("output", []byte("allowed"), 0600) == nil
 		_, err = os.ReadFile(args[1])
 		checks["host_secret_denied"] = err != nil
+		rootFD, rootErr := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+		checks["root_directory_open"] = rootErr == nil
+		checks["root_openat_host_secret_denied"] = false
+		if rootErr == nil {
+			secretFD, openErr := unix.Openat(rootFD, strings.TrimPrefix(args[1], "/"), unix.O_RDONLY, 0)
+			checks["root_openat_host_secret_denied"] = openErr != nil
+			if secretFD >= 0 {
+				_ = unix.Close(secretFD)
+			}
+			_ = unix.Close(rootFD)
+		}
+		checks["symlink_positive"] = os.Symlink(args[1], "outside-link") == nil
+		_, err = os.ReadFile("outside-link")
+		checks["symlink_host_secret_denied"] = err != nil
 		checks["host_write_denied"] = os.WriteFile(args[1]+"-write", []byte("escape"), 0600) != nil
 		connection, err := net.DialTimeout("tcp", args[2], 300*time.Millisecond)
 		checks["host_network_denied"] = err != nil
@@ -111,6 +128,9 @@ func run(out string) (err error) {
 	profile := `(version 1)
 (deny default)
 (allow process-exec process-fork sysctl-read file-read-metadata)
+; dyld/libignition opens the root directory during startup. This allows only
+; immediate root enumeration, never recursive reads of otherwise denied files.
+(allow file-read-data (literal "/"))
 (allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/Library/Apple/System") (subpath "/private/var/db/dyld") (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))
 (allow file-write-data (literal "/dev/null"))
 (allow file-read* file-write* (subpath ` + strconv.Quote(work) + `))

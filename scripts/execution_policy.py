@@ -92,6 +92,7 @@ def supervised(argv, cwd, env, stdout, stderr, timeout=120, cancel=None, admissi
         raise ValueError('background handoff requires owned stdout capture')
     previous = {}
     proc = None
+    cleanup_seconds = 0
     def interrupted(signum, frame):
         if transferred is None:
             raise KeyboardInterrupt(f"execution interrupted by signal {signum}")
@@ -170,7 +171,9 @@ def supervised(argv, cwd, env, stdout, stderr, timeout=120, cancel=None, admissi
             signal.signal(signum, signal.SIG_IGN)
         try:
             if proc is not None:
+                cleanup_started = time.monotonic()
                 kill_tree(proc)
+                cleanup_seconds = time.monotonic() - cleanup_started
         finally:
             for descriptor in [ready_read, ready_write, commit_read, commit_write]:
                 if descriptor is not None:
@@ -189,6 +192,7 @@ def supervised(argv, cwd, env, stdout, stderr, timeout=120, cancel=None, admissi
             with Path(path).open('r+b') as stream:
                 stream.truncate(min(os.fstat(stream.fileno()).st_size, MAX_OUTPUT // 2))
     return {'exit_code': 0 if transferred is not None else 124 if reason == 'timeout' else 130 if reason == 'cancelled' else 125 if reason else proc.returncode,
+            'cleanup_s': round(cleanup_seconds, 3), 'owned_exit_code': proc.returncode if proc is not None else None,
             'failure_kind': reason, 'background_handoff': transferred, 'stdout': tail(stdout), 'stderr': tail(stderr),
             'stdout_path': str(stdout), 'stderr_path': str(stderr),
             'output_truncated': Path(stdout).stat().st_size > TAIL or Path(stderr).stat().st_size > TAIL,

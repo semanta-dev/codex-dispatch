@@ -272,9 +272,31 @@ that in per-command output, the broker runs a one-shot `command/exec` preflight
 before starting the turn: when the requested sandboxed mode can't initialize, the
 dispatch **fails fast** with exit `64` and an actionable message. Because
 `workspace-write` is now the default, a restricted host hits this preflight on a
-default run. Fixes: set `CODEX_SANDBOX=danger-full-access` (the explicit opt-in,
-which never invokes bubblewrap and is skipped by the preflight), or lift the host
-restriction with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+default run. Configure a supported host policy for the exact sandbox executable.
+Changing `CODEX_SANDBOX` does not change the independent verification policy.
+
+### Reviewed verification sandbox
+
+Reviewed verification currently requires Linux `/usr/bin/bwrap` and a host
+policy that permits its user and network namespaces. A bootstrap failure is
+reported as `sandbox-initialization-failed`; no verification command is retried
+on the host, with sudo, or with isolation disabled. macOS and Windows
+verification remain unsupported pending native backend qualification.
+
+On Ubuntu 24.04, the CI qualification configuration uses an AppArmor profile
+attached specifically to the root-owned, non-writable `/usr/bin/bwrap`, with a
+`userns` allowance. It leaves global restrictions enabled and preserves existing
+profiles. An administrator must assess the equivalent prerequisite on a user's
+machine. The disposable-runner provisioning script is
+[`scripts/ci-configure-bwrap.sh`](../scripts/ci-configure-bwrap.sh); it refuses to
+run outside GitHub Linux runners and is not a user installation command.
+
+The verifier still removes host HOME/credentials and network access, uses a
+throwaway source snapshot, and checks deadlines and output quotas. Its current
+snapshot excludes ignored dependencies and host caches. Projects needing those
+inputs require an explicit, qualified dependency/toolchain policy; a successful
+small positive control does not establish compatibility for arbitrary builds.
+
 
 ### Network failure during binary download (exit 7)
 

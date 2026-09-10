@@ -24,3 +24,19 @@ ownership after controller failure, repeated interruption and deadlines;
 resource limits; dependency/toolchain inputs; and legitimate Go/Python/Node
 verification compatibility. No host fallback or reduction of supported-platform
 qualification is implied by this experiment.
+
+## Native startup investigation
+
+Runs `34440616692` and `34440949208` failed on both architectures before
+application code. Even `/usr/bin/true` and `/bin/sh` aborted. Retained crash
+reports show `ignition_halt`, `boot_boot`, and `dyld4::CacheFinder`, termination
+namespace `0x23`, code 2. These runs establish no child boundary or lifecycle
+pass.
+
+A [matching external diagnosis](https://github.com/lanefoundry/looplane/blob/HEAD/.research/macos-sandbox-diagnosis.md)
+identifies dyld's root-directory open as the denied operation. The next native
+experiment adds only `(allow file-read-data (literal "/"))`. This deliberately
+permits enumeration of immediate root entries, not recursive file reads. All
+fake-secret, outside-write and reachable-host network controls remain required.
+The external report is a hypothesis for our environment until the native result
+confirms startup; it is not substituted for our own qualification evidence.

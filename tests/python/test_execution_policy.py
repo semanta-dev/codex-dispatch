@@ -97,12 +97,15 @@ PROBE'''
     def test_hang_and_noisy_output_are_bounded(self):
         self.require_linux()
         for command, reason in [('sleep 10', 'timeout'), ('yes noisy', 'output-limit')]:
-            started = time.monotonic()
-            result = self.run_check(command, timeout=1)
-            self.assertEqual(result['failure_kind'], reason, result)
-            self.assertLess(time.monotonic() - started, 3)
-            self.assertLessEqual(len(result['stdout']), policy.TAIL)
-            self.assertLessEqual((self.root / 'stdout').stat().st_size, policy.MAX_OUTPUT)
+            with self.subTest(command=command, expected_failure=reason):
+                started = time.monotonic()
+                result = self.run_check(command, timeout=1)
+                elapsed = time.monotonic() - started
+                diagnostic = {'command': command, 'elapsed_s': elapsed, 'result': result}
+                self.assertEqual(result['failure_kind'], reason, diagnostic)
+                self.assertLess(elapsed, 3, diagnostic)
+                self.assertLessEqual(len(result['stdout']), policy.TAIL, diagnostic)
+                self.assertLessEqual((self.root / 'stdout').stat().st_size, policy.MAX_OUTPUT, diagnostic)
 
     def test_special_and_oversized_output_fail_without_unbounded_read(self):
         self.require_linux()

@@ -57,6 +57,7 @@ type identity struct {
 	Arch            string `json:"observer_goarch"`
 }
 type childResult struct {
+	Prerequisites               map[string]string `json:"prerequisite_access"`
 	GoStandardLibraryCompatible bool              `json:"go_standard_library_compatible"`
 	GoStandardLibraryError      string            `json:"go_standard_library_error,omitempty"`
 	DenialErrors                map[string]string `json:"denial_errors"`
@@ -78,6 +79,7 @@ type phase struct {
 type lifecycleResult struct {
 	PIDs                 []int           `json:"observed_pids"`
 	Identities           []identity      `json:"observed_identities"`
+	ChildDiagnostic      json.RawMessage `json:"child_diagnostic,omitempty"`
 	SupervisorDiagnostic json.RawMessage `json:"supervisor_diagnostic,omitempty"`
 	SupervisorTerminated bool            `json:"supervisor_terminated"`
 	DescendantsSignaled  int             `json:"descendants_signaled"`
@@ -226,7 +228,7 @@ func socketConnect(address string) error {
 	}
 	var data syscall.WSAData
 	if err = syscall.WSAStartup(0x202, &data); err != nil {
-		return fmt.Errorf("WSAStartup: %w", err)
+		return fmt.Errorf("WSAStartup error=%d: %w", err, err)
 	}
 	defer syscall.WSACleanup()
 	socket, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
@@ -268,6 +270,30 @@ func loopbackListener() (syscall.Handle, string, error) {
 	return socket, fmt.Sprintf("127.0.0.1:%d", tcp.Port), nil
 }
 
+// Read-only prerequisite diagnostics. Never change existing registry/file ACLs
+// or dump their contents; report only API status for fixed public OS resources.
+func prerequisiteAccess() map[string]string {
+	result := map[string]string{}
+	openKey := windows.NewLazySystemDLL("advapi32.dll").NewProc("RegOpenKeyExW")
+	closeKey := windows.NewLazySystemDLL("advapi32.dll").NewProc("RegCloseKey")
+	for _, path := range []string{`SYSTEM\CurrentControlSet\Services\WinSock2\Parameters`, `SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9`, `SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\NameSpace_Catalog5`, `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters`} {
+		name, _ := windows.UTF16PtrFromString(path)
+		var key windows.Handle
+		status, _, _ := openKey.Call(uintptr(syscall.HKEY_LOCAL_MACHINE), uintptr(unsafe.Pointer(name)), 0, 0x20019, uintptr(unsafe.Pointer(&key)))
+		result["HKLM\\"+path] = fmt.Sprintf("RegOpenKeyEx KEY_READ status=%d", status)
+		if status == 0 {
+			closeKey.Call(uintptr(key))
+		}
+	}
+	for _, name := range []string{"ws2_32.dll", "mswsock.dll", "nsi.dll"} {
+		handle, err := windows.LoadLibraryEx(name, 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
+		result["System32/"+name] = fmt.Sprint(err)
+		if err == nil {
+			windows.FreeLibrary(handle)
+		}
+	}
+	return result
+}
 func checkGoStandardLibrary(scratch string) (compatible bool, diagnostic string) {
 	defer func() {
 		if failure := recover(); failure != nil {
@@ -312,6 +338,7 @@ func child(name string) int {
 	if err != nil {
 		result.DenialErrors["network"] = err.Error()
 	}
+	result.Prerequisites = prerequisiteAccess()
 	result.GoStandardLibraryCompatible, result.GoStandardLibraryError = checkGoStandardLibrary(os.Getenv("PROBE_SCRATCH"))
 	result.EnvironmentClean = os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("PROBE_FAKE_PARENT_CREDENTIAL") == ""
 	raw, _ := json.MarshalIndent(result, "", "  ")
@@ -496,10 +523,21 @@ func lifecycleChild(mode string) int {
 		return 2
 	}
 	scratch := os.Getenv("PROBE_SCRATCH")
+	fail := func(stage string, err error) int {
+		raw, _ := json.Marshal(map[string]string{"stage": stage, "error": fmt.Sprint(err)})
+		if !rawExists(filepath.Join(scratch, "lifecycle-child-error.json")) {
+			rawWrite(filepath.Join(scratch, "lifecycle-child-error.json"), raw)
+		}
+		if handle, e := windows.GetStdHandle(windows.STD_ERROR_HANDLE); e == nil {
+			var n uint32
+			windows.WriteFile(handle, append(raw, '\n'), &n, nil)
+		}
+		return 3
+	}
 	if mode == "delayed" {
 		raw, _ := json.Marshal(map[string]int{"pid": os.Getpid()})
-		if rawWrite(filepath.Join(scratch, "grandchild-ready.json"), raw) != nil {
-			return 3
+		if err := rawWrite(filepath.Join(scratch, "grandchild-ready.json"), raw); err != nil {
+			return fail("grandchild ready write", err)
 		}
 		time.Sleep(10 * time.Second)
 		if rawWrite(filepath.Join(scratch, "grandchild-late.txt"), []byte("late")) != nil {
@@ -514,7 +552,7 @@ func lifecycleChild(mode string) int {
 		si := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
 		pi := windows.ProcessInformation{}
 		if err := windows.CreateProcess(app, line, nil, nil, false, windows.CREATE_NO_WINDOW, nil, nil, &si, &pi); err != nil {
-			return 3
+			return fail("CreateProcess inherited LPAC child", err)
 		}
 		defer windows.CloseHandle(pi.Process)
 		defer windows.CloseHandle(pi.Thread)
@@ -526,14 +564,14 @@ func lifecycleChild(mode string) int {
 			}
 			if time.Now().After(deadline) {
 				kill()
-				return 3
+				return fail("grandchild readiness timeout", nil)
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
 		raw, _ := json.Marshal([]int{os.Getpid(), int(pi.ProcessId)})
-		if rawWrite(filepath.Join(scratch, "lifecycle-ready.json"), raw) != nil {
+		if err := rawWrite(filepath.Join(scratch, "lifecycle-ready.json"), raw); err != nil {
 			kill()
-			return 3
+			return fail("parent ready write", err)
 		}
 		time.Sleep(10 * time.Second)
 		rawWrite(filepath.Join(scratch, "parent-late.txt"), []byte("late"))
@@ -590,6 +628,10 @@ func supervisor() int {
 }
 func crashProbe(helper, scratch string, env map[string]string, sid *windows.SID) (result lifecycleResult) {
 	defer func() {
+		childRaw, childErr := os.ReadFile(filepath.Join(scratch, "lifecycle-child-error.json"))
+		if childErr == nil && json.Valid(childRaw) {
+			result.ChildDiagnostic = childRaw
+		}
 		raw, err := os.ReadFile(filepath.Join(scratch, "supervisor-result.json"))
 		if err == nil && json.Valid(raw) {
 			result.SupervisorDiagnostic = raw

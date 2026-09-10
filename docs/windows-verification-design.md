@@ -152,3 +152,21 @@ uses a per-installation native object directory with `OBJ_OPENIF`; a future
 experiment could provision only that copied runtime's unique directory with
 explicit package ACLs. Such an experiment needs separate scope review and must
 never change the parent namespace or grant broad object access.
+
+## Third native observation
+
+Candidate `63f25ae`, run [34440756624](https://github.com/semanta-dev/codex-dispatch/actions/runs/34440756624),
+retained NO-GO on both architectures. Raw fixed controls now demonstrate
+credential-read denial, outside-write denial, clean environment, LPAC identity,
+and refused job breakaway. ARM64 additionally demonstrated forced supervisor
+termination with both observed descendants signaled and no delayed writes.
+The amd64 lifecycle child exited before readiness; exact-stage diagnostics have
+been added rather than treating the ARM64 result as portable proof.
+
+Both actual Go standard-library controls still failed. Winsock startup reported
+"A system call has failed", and MSYS remained incompatible. The next diagnostic
+reads only access status for four fixed public Winsock/TCPIP registry locations
+and three system DLLs. It records numeric Winsock error codes and makes no ACL,
+capability, or registry modification. `registryRead` is a known broad LPAC
+capability, not an approved remediation: a necessary, sufficiently narrow
+resource policy has not yet been established.

@@ -51,7 +51,20 @@ def drain():
             except ChildProcessError:
                 break
         time.sleep(.01)
-    return not descendants(os.getpid())
+    remaining = descendants(os.getpid())
+    if remaining:
+        # PID/state diagnostics identify a failed drain without exposing argv,
+        # environment, or repository data in captured verification logs.
+        states = []
+        for child in sorted(remaining):
+            try:
+                status = Path(f'/proc/{child}/status').read_text()
+                fields = [line for line in status.splitlines() if line.startswith(('State:', 'PPid:', 'NSpid:'))]
+                states.append(f'{child}: ' + ', '.join(fields))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        print('owned-process: descendant drain deadline: ' + '; '.join(states), file=sys.stderr, flush=True)
+    return not remaining
 
 
 def main():
