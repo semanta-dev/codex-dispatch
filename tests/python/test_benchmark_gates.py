@@ -49,6 +49,23 @@ class BenchmarkGateTests(unittest.TestCase):
     def test_incomplete_cohort_marker_never_promotes(self):
         self.assertFalse(self.score(self.cohort(), full=False)["paired_go"])
 
+    def test_tail_tokens_and_human_repairs_include_rejected_attempts(self):
+        rows = self.cohort()
+        for row in rows.values():
+            row.update(codex_tokens={'output_tokens': 2}, claude_tokens={'outputTokens': 3}, human_code_repair_minutes=0)
+        rows['C01-1-plugin'].update(accepted=False, seconds=100, human_code_repair_minutes=4)
+        rows['C01-2-plugin']['seconds'] = 20
+        rows['C01-3-plugin']['seconds'] = 30
+        arm = self.score(rows)['arms']['plugin']
+        self.assertEqual(arm['p95_seconds_accepted_nearest_rank'], 20)
+        self.assertEqual(arm['max_seconds_accepted'], 30)
+        self.assertEqual(arm['max_seconds_all_observed'], 100)
+        self.assertEqual(arm['known_token_totals_including_failures']['codex_tokens']['output_tokens'], 60)
+        self.assertEqual(arm['known_token_totals_including_failures']['claude_tokens']['outputTokens'], 90)
+        self.assertEqual(arm['observed_human_code_repair_minutes'], 4)
+        del rows['C01-1-plugin']['human_code_repair_minutes']
+        self.assertIsNone(self.score(rows)['arms']['plugin']['observed_human_code_repair_minutes'])
+
     def test_median_cost_is_diagnostic_total_spend_is_gate(self):
         rows = self.cohort()
         for n, (key, value) in enumerate((k, v) for k, v in rows.items() if k.endswith("plugin")):

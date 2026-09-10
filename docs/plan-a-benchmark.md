@@ -186,3 +186,17 @@ remain fixed, resumes stay within that chain, and the final report's count and
 run/session must match its completed tail. An old successful run cannot satisfy
 a claimed retry. The independent paired audit reconciles the ledger with the
 actual run/session inventory, rather than trusting the model's iteration count.
+
+### Diagnostic reporting additions
+
+Future freezes include nearest-rank p95 and maximum accepted latency, maximum
+observed latency including rejected attempts, and aggregate known Codex/Claude
+token totals including failures. Unknown accounting still vetoes promotion.
+Observed human code-repair minutes are recorded explicitly for automated trials
+(zero interventions); absent older measurements remain unknown. These are
+diagnostics, not new or relaxed promotion thresholds.
+
+The excluded v8 two-trial transport probe accepted both C01 results using the
+real API and receipt-bound StructuredOutput validation. Direct: 13.95 seconds
+and $0.06121; plugin: 29.73 seconds and $0.0834432. The schema compatibility
+repair worked, but this probe does not establish economics or promotion.

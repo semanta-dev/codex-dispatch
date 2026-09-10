@@ -267,6 +267,7 @@ def execute(out, limit):
             except Exception as error:
                 exception = (exception or "") + f"; final-state audit: {error}"
             dump(trial / "outcome.json", {"case": case, "arm": entry["arm"], "seconds": elapsed, "cleanup_seconds": cleanup_seconds, "statuses": statuses, "oracle_errors": errors,
+                  "human_code_repair_minutes": 0, "human_repair_basis": "automated trial; no human code repair performed by driver",
                   "outside_changes": outside, "index_preserved": index_preserved, "exception": exception,
                   "behavior_accepted": not exception and after is not None and not errors and not outside and bool(statuses) and statuses[-1] == 0,
                   "promotion_accepted": False, "unverified": ["independent acceptance and cost audit"]})

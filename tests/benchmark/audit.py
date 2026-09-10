@@ -279,7 +279,10 @@ def accounting(trial, entry, inventory, module, rates):
         issues.append("no owned Codex session evidence")
     codex_cost = ((totals["input_tokens"] - totals["cached_input_tokens"]) * rates["input"] + totals["cached_input_tokens"] * rates["cached_input"] + totals["output_tokens"] * rates["output"]) / 1e6
     complete = not issues
+    claude_tokens = {key: sum(usage.get(key, 0) for usage in final.get('modelUsage', {}).values())
+                     for key in ['inputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'outputTokens', 'thinkingTokens']}
     return {"cost_complete": complete, "cost_issues": issues, "policy_errors": policy_errors,
+            "claude_tokens": claude_tokens,
             "codex_tokens": totals, "codex_cost_equivalent_usd": codex_cost, "claude_cost_equivalent_usd": claude_cost,
             "known_cost_equivalent_usd": codex_cost + (claude_cost or 0),
             "total_cost_equivalent_usd": codex_cost + claude_cost if complete else None,
@@ -292,6 +295,7 @@ def audit_trial(out, entry, inventory, module, rates):
     outcome = read(trial / "outcome.json") if (trial / "outcome.json").exists() else {}
     violations = []
     score = {"safety_violations": violations, "accepted": False, "failures": failures, "seconds": outcome.get("seconds"), "cost_complete": False,
+             "human_code_repair_minutes": outcome.get("human_code_repair_minutes"),
              "total_cost_equivalent_usd": None, "known_cost_equivalent_usd": None}
     # Accounting executes independently of acceptance so rejected runs keep spend.
     try:
@@ -399,7 +403,18 @@ def aggregate(results, summary):
         selected = [v for k, v in results.items() if k.endswith(arm)]
         accepted = [v for v in selected if v["accepted"]]
         cost_complete = all(v["cost_complete"] for v in selected)
+        latencies = sorted(v['seconds'] for v in accepted)
+        observed = [v for v in selected if v.get('seconds') is not None]
+        repairs = [v.get('human_code_repair_minutes') for v in observed]
         summary["arms"][arm] = {"accepted": len(accepted), "total": len(selected), "cost_complete": cost_complete,
+            "p95_seconds_accepted_nearest_rank": latencies[math.ceil(.95 * len(latencies)) - 1] if latencies else None,
+            "max_seconds_accepted": max(latencies) if latencies else None,
+            "max_seconds_all_observed": max((v['seconds'] for v in observed), default=None),
+            "observed_human_code_repair_minutes": sum(repairs) if repairs and all(nonnegative(v) for v in repairs) else None,
+            "known_token_totals_including_failures": {
+                provider: {key: sum(v.get(provider, {}).get(key, 0) for v in selected)
+                           for key in sorted({key for v in selected for key in v.get(provider, {})})}
+                for provider in ['codex_tokens', 'claude_tokens']},
             "median_seconds_accepted": statistics.median(v["seconds"] for v in accepted) if accepted else None,
             "median_cost_accepted": statistics.median(v["total_cost_equivalent_usd"] for v in accepted) if accepted and cost_complete else None,
             "cost_per_accepted_including_failures": sum(v["total_cost_equivalent_usd"] for v in selected) / len(accepted) if accepted and cost_complete else None,
