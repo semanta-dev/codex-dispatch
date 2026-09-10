@@ -472,6 +472,7 @@ func (t *Table) Cancel(id string) error {
 	}
 	rec.task.State = StateCancelled
 	rec.task.FinishedAt = t.nowUTC()
+	rec.task.ExitCode = 64
 	persistErr := t.persistLocked(rec)
 	t.evictTerminalLocked()
 	fn := t.onActivity
@@ -486,6 +487,9 @@ func (t *Table) Cancel(id string) error {
 // terminal (e.g. a concurrent task.cancel already moved it to cancelled), so
 // the drain can call it unconditionally after interrupting the turn.
 func (t *Table) MarkCancelled(id string, exitCode int) error {
+	if exitCode == 0 {
+		exitCode = 64
+	}
 	t.mu.Lock()
 	rec, ok := t.tasks[id]
 	if !ok {
@@ -788,6 +792,7 @@ func (t *Table) DeregisterSession(sessionID string, cancelQueued bool) []string 
 		if rec.task.State == StateQueued {
 			rec.task.State = StateCancelled
 			rec.task.FinishedAt = t.nowUTC()
+			rec.task.ExitCode = 64
 			cancelled = append(cancelled, id)
 		}
 	}

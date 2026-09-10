@@ -253,3 +253,21 @@ interruption fixture failed because AllocConsole was called after a zero window
 handle and returned access denied. The next correction uses the console process
 list to detect attachment; the headless-console explanation remains a hypothesis
 until native validation. No interruption test was skipped or weakened.
+
+### Native cancellation result repair
+
+Hosted run 34422145400 exposed a genuine cancellation race on macOS arm64:
+`turn/start` returned context cancellation after the table was already cancelled,
+but dispatchFailure unconditionally emitted/returned errored. A deterministic
+three-state regression reproduced the mismatch before repair. Failure handling
+now preserves an existing terminal outcome, and focused cancellation race tests
+pass twenty repetitions.
+
+Cancellation records now always carry a nonzero code. The dispatch adapter also
+rejects zero-success for every state other than done, preventing older/malformed
+cancelled replies with real edits from writing success result.json. An actual
+broker-to-result regression preserves partial edits while requiring failure.
+Windows now passes all 91 native shell cases; the newly reached Python failure
+was a fixture assuming chmod creates POSIX execute bits on Windows. It now
+checks the source mode actually preserved, retaining the explicit POSIX 0755,
+native symlink and deletion checks.

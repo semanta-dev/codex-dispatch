@@ -752,3 +752,65 @@ func TestRunCaptureFailureIsExplicitAndInvalidatesPatch(t *testing.T) {
 		t.Fatalf("stale patch remains: %v", err)
 	}
 }
+
+func TestCancelledBrokerWithEditsCannotWriteSuccessResult(t *testing.T) {
+	requireCodex(t)
+	repo := setupGitRepo(t)
+	chdirTo(t, repo)
+	addr := filepath.Join(repo, ".codex-dispatch", "broker.addr")
+	if err := os.MkdirAll(filepath.Dir(addr), 0755); err != nil {
+		t.Fatal(err)
+	}
+	srv := broker.NewServer("127.0.0.1:0")
+	srv.SetAddrFile(addr)
+	srv.HandleFunc("broker.ping", func(context.Context, json.RawMessage) (any, error) { return map[string]string{"version": "test"}, nil })
+	srv.HandleFunc("dispatch.run", func(_ context.Context, raw json.RawMessage) (any, error) {
+		var params broker.DispatchRunParams
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(repo, "partial.txt"), []byte("unfinished edit\n"), 0644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(params.LogPath, nil, 0644); err != nil {
+			return nil, err
+		}
+		return broker.DispatchRunResult{State: string(broker.StateCancelled), ExitCode: 0, SessionID: "cancelled-session"}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = srv.Serve(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(addr); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("broker did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	env := Env{WorkDir: repo, Task: "write partial.txt", Acceptance: "complete the task", Sandbox: "workspace-write", ResultDir: filepath.Join(repo, ".codex-dispatch", "runs", "cancelled")}
+	var out, stderr strings.Builder
+	if rc, err := Run(env, &out, &stderr); rc != 0 || err != nil {
+		t.Fatalf("dispatch failed to retain result: rc=%d err=%v stderr=%s", rc, err, stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(env.ResultDir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		ExitCode int      `json:"exit_code"`
+		Files    []string `json:"files_changed"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == 0 || len(result.Files) == 0 {
+		t.Fatalf("cancellation with real edits misrepresented: %s", raw)
+	}
+	if body, err := os.ReadFile(filepath.Join(repo, "partial.txt")); err != nil || string(body) != "unfinished edit\n" {
+		t.Fatal("partial edits were lost")
+	}
+}

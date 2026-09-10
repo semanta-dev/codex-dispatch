@@ -539,8 +539,29 @@ func turnToExit(turn *appserver.Turn) (int, string) {
 // notification into stdout.log, and returns a DispatchRunResult with exit
 // 64. Callers should return this directly.
 func dispatchFailure(state *BrokerState, logW *LogWriter, taskID, msg string, emit func(string, any)) DispatchRunResult {
+	if err := state.Table.MarkErrored(taskID, 64, msg); err != nil {
+		// Cancellation or another terminal transition can win while an RPC
+		// (notably turn/start) is returning an error. Report the recorded
+		// outcome rather than inventing a contradictory error event/result.
+		if st, statusErr := state.Table.Status(taskID); statusErr == nil && st.State.IsTerminal() {
+			reason := st.ErrorMessage
+			switch st.State {
+			case StateCancelled:
+				reason = "task cancelled"
+				emit("task.cancelled", map[string]any{"task_id": taskID})
+			case StateDone:
+				emit("task.finished", map[string]any{"exit_code": st.ExitCode, "session_id": st.CodexSession, "error": reason})
+			case StateErrored:
+				emit("task.errored", map[string]any{"error": reason})
+			}
+			return DispatchRunResult{
+				TaskID: taskID, State: string(st.State), ExitCode: st.ExitCode,
+				SessionID: st.CodexSession, FellBackToFresh: st.FellBackToFresh,
+				EventCount: countEvents(state.Table, taskID), ErrorMessage: reason,
+			}
+		}
+	}
 	_ = logW.WriteSyntheticError("broker/dispatch/error", msg)
-	_ = state.Table.MarkErrored(taskID, 64, msg)
 	emit("task.errored", map[string]any{"error": msg})
 	return DispatchRunResult{
 		TaskID:       taskID,

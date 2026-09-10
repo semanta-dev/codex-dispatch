@@ -55,7 +55,11 @@ class FaninTests(unittest.TestCase):
             fanin.apply(parent, work, manifest, changed, root/'recovery')
             self.assertEqual(os.readlink(parent/'link'), 'new-target')
             self.assertFalse((parent/'deleted').exists())
-            self.assertEqual((parent/'executable').stat().st_mode & 0o777, 0o755)
+            # Windows chmod does not synthesize POSIX execute bits. Fan-in
+            # must preserve the mode the source filesystem actually reports.
+            self.assertEqual(fanin.state(parent/'executable'), fanin.state(work/'executable'))
+            if os.name != 'nt':
+                self.assertEqual((parent/'executable').stat().st_mode & 0o777, 0o755)
 
 
 if __name__ == '__main__':

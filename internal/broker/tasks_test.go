@@ -502,3 +502,29 @@ func TestEvictionConcurrentSafe(t *testing.T) {
 		t.Fatalf("terminal tasks = %d, want <= 8 (cap)", got)
 	}
 }
+
+func TestCancellationRecordsNonzeroExitCode(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		table := NewTable(1, 64)
+		id, _ := table.Start("session", TaskParams{Mode: "fresh"})
+		if running {
+			if err := table.MarkRunning(id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := table.Cancel(id); err != nil {
+			t.Fatal(err)
+		}
+		status, err := table.Status(id)
+		if err != nil || status.State != StateCancelled || status.ExitCode == 0 {
+			t.Fatalf("cancelled task appears successful: %+v, %v", status, err)
+		}
+	}
+	table := NewTable(1, 64)
+	id, _ := table.Start("session", TaskParams{Mode: "fresh"})
+	table.DeregisterSession("session", true)
+	status, _ := table.Status(id)
+	if status.State != StateCancelled || status.ExitCode == 0 {
+		t.Fatalf("session cancellation appears successful: %+v", status)
+	}
+}

@@ -99,12 +99,23 @@ func dispatchViaBroker(ctx context.Context, mode, prevSessionID, prompt, sandbox
 	if err != nil {
 		return Run{ExitCode: -1}, err
 	}
+	return fromBrokerResult(res), nil
+}
+
+func fromBrokerResult(res *broker.DispatchRunResult) Run {
+	code, message := res.ExitCode, res.ErrorMessage
+	if code == 0 && res.State != string(broker.StateDone) {
+		code = 64
+		if message == "" {
+			message = fmt.Sprintf("broker returned non-completed state %q with zero exit code", res.State)
+		}
+	}
 	return Run{
-		ExitCode:        res.ExitCode,
+		ExitCode:        code,
 		SessionID:       res.SessionID,
 		FellBackToFresh: res.FellBackToFresh,
-		ErrorMessage:    res.ErrorMessage,
-	}, nil
+		ErrorMessage:    message,
+	}
 }
 
 // threadCWD chooses the directory codex should use as its thread cwd. It is

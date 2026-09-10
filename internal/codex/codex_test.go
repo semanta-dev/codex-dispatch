@@ -331,3 +331,20 @@ func TestLogHasFallbackMarker(t *testing.T) {
 		t.Fatalf("LogHasFallbackMarker should be false when marker absent")
 	}
 }
+
+func TestNonCompletedBrokerStateNeverBecomesSuccessfulRun(t *testing.T) {
+	for _, state := range []string{"", "queued", "running", "cancelled", "errored"} {
+		t.Run(state, func(t *testing.T) {
+			result := fromBrokerResult(&broker.DispatchRunResult{State: state, ExitCode: 0})
+			if result.ExitCode == 0 || result.ErrorMessage == "" {
+				t.Fatalf("non-completed broker state became success: %+v", result)
+			}
+		})
+	}
+	for _, code := range []int{0, 4, 17} {
+		result := fromBrokerResult(&broker.DispatchRunResult{State: "done", ExitCode: code})
+		if result.ExitCode != code {
+			t.Fatalf("completed exit %d changed to %d", code, result.ExitCode)
+		}
+	}
+}

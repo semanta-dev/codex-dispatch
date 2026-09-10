@@ -915,3 +915,47 @@ func TestDispatchRunDropsRealThreadStartedAndSynthesizesOne(t *testing.T) {
 		t.Fatalf("log synthesized thread/started missing thread id:\n%s", raw)
 	}
 }
+
+// Cancellation can win while StartTurn is still awaiting its RPC response.
+// A subsequent context error must preserve the task's recorded terminal state.
+func TestDispatchFailurePreservesExistingTerminalState(t *testing.T) {
+	for _, terminal := range []State{StateCancelled, StateDone, StateErrored} {
+		t.Run(string(terminal), func(t *testing.T) {
+			state := &BrokerState{Table: NewTable(1, 64)}
+			id, _ := state.Table.Start("claude-session", TaskParams{Mode: "fresh"})
+			if err := state.Table.MarkRunning(id); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch terminal {
+			case StateCancelled:
+				err = state.Table.Cancel(id)
+			case StateDone:
+				err = state.Table.MarkDone(id, 0, "codex-session", false)
+			case StateErrored:
+				err = state.Table.MarkErrored(id, 17, "original failure")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := state.Table.Status(id)
+			log, err := OpenLogWriter(filepath.Join(t.TempDir(), "stdout.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer log.Close()
+			var events []string
+			result := dispatchFailure(state, log, id, "start turn: context canceled", func(kind string, _ any) { events = append(events, kind) })
+			if result.State != string(before.State) || result.ExitCode != before.ExitCode {
+				t.Fatalf("wire state=%s exit=%d, recorded state=%s exit=%d", result.State, result.ExitCode, before.State, before.ExitCode)
+			}
+			wantEvent := map[State]string{StateCancelled: "task.cancelled", StateDone: "task.finished", StateErrored: "task.errored"}[terminal]
+			if len(events) != 1 || events[0] != wantEvent {
+				t.Fatalf("terminal events=%v, want only %s", events, wantEvent)
+			}
+			if terminal == StateErrored && result.ErrorMessage != "original failure" {
+				t.Fatalf("original failure replaced: %q", result.ErrorMessage)
+			}
+		})
+	}
+}
