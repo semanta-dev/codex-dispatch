@@ -117,18 +117,22 @@ def expand(event):
     directory = repo / ".codex-dispatch/expansions" / sid
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / (pid + ".json")
+    env = environment(config, repo)
+    env["REVIEW_RECEIPT_PATH"] = str(path)
+    env["REVIEW_INVOCATION_ID"] = json.dumps(identity, sort_keys=True)
+    dispatch_env = {k: env[k] for k in ["CODEX_TASK", "CODEX_ACCEPTANCE", "CODEX_FILES", "CODEX_WORKDIR", "CODEX_CONSTRAINTS", "REVIEW_TEST_POLICY", "REVIEW_TEST_CMD", "REVIEW_VERIFY_CMD", "REVIEW_CLEAN_VERIFY", "REVIEW_RECEIPT_PATH", "REVIEW_INVOCATION_ID"]}
+    header = {"identity": identity, "config": config, "dispatch_env": dispatch_env}
     # Exclusive create precedes execution. A crash or concurrent duplicate stays
     # blocked; it cannot silently dispatch again under the same prompt identity.
     try:
         with path.open("x") as output:
-            json.dump({"identity": identity, "status": "running"}, output)
+            json.dump({**header, "status": "running"}, output)
     except FileExistsError:
         saved = json.loads(path.read_text())
         if saved.get("identity") != identity or saved.get("status") != "complete":
             raise ValueError("duplicate command is pending/failed or identity changed")
         return saved["output"]
     try:
-        env = environment(config, repo)
         background = ["--detach"] if config["detach"] else ["--list"] if config["list"] else ["--status", config["status"]] if config["status"] else ["--cancel", config["cancel"]] if config["cancel"] else []
         if background:
             output = invoke([EVIDENCE.bash_executable(), (ROOT / "dispatch-codex.sh").as_posix(), *background], env, cwd)
@@ -138,15 +142,15 @@ def expand(event):
             if bundle.get("complete") is not True or bundle.get("error"):
                 raise ValueError("incomplete dispatch evidence")
             payload = {"identity": identity, "kind": "review", "iteration": 1, "config": config,
-                       "dispatch_env": {k: v for k, v in env.items() if k.startswith("REVIEW_") or k in ["CODEX_TASK", "CODEX_ACCEPTANCE", "CODEX_FILES", "CODEX_WORKDIR", "CODEX_CONSTRAINTS"]},
+                       "dispatch_env": dispatch_env,
                        "bundle": bundle, "run_dir": bundle["run_dir"], "codex_session": bundle["result"]["session_id"]}
         payload["receipt_path"] = str(path)
         context = "CODEX_EXPANSION_RECEIPT\n" + json.dumps(payload) + "\nEND_CODEX_EXPANSION_RECEIPT"
         output = {"hookSpecificOutput": {"hookEventName": "UserPromptExpansion", "additionalContext": context}}
-        write(path, {"identity": identity, "status": "complete", "payload": payload, "output": output})
+        write(path, {**header, "status": "complete", "payload": payload, "output": output})
         return output
     except Exception as error:
-        write(path, {"identity": identity, "status": "failed", "error": str(error)})
+        write(path, {**header, "status": "failed", "error": str(error)})
         raise
 
 

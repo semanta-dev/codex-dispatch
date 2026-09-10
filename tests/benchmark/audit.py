@@ -90,7 +90,7 @@ def command_loaded(transcripts, contract_digest):
 
 
 def expansion_receipt(trial, transcripts, sid):
-    paths = list((trial / "repo/.codex-dispatch/expansions").glob("*/*.json"))
+    paths = [path for path in (trial / "repo/.codex-dispatch/expansions").glob("*/*.json") if not path.name.endswith(".runs.json")]
     if len(paths) != 1:
         raise ValueError("exactly one current expansion receipt required")
     saved = read(paths[0])
@@ -118,7 +118,7 @@ def expansion_receipt(trial, transcripts, sid):
     raise ValueError("current receipt not delivered before reviewer inference")
 
 
-def claude_evidence(trial, direct_route=False, compact=False):
+def claude_evidence(trial, direct_route=False, compact=False, structured=False):
     stream = events(trial / "attempt-1.stdout.jsonl")
     reports = [e for e in stream if e.get("type") == "result"]
     final = reports[-1] if reports else {}
@@ -156,6 +156,14 @@ def claude_evidence(trial, direct_route=False, compact=False):
     if direct_route:
         review_texts = [final.get("result", "")] if reports else []
     issues = []
+    if structured:
+        report = final.get("structured_output", {})
+        validation = [event for event in stream if event.get("type") == "codex_review_validation"]
+        if not isinstance(report, dict) or report.get("kind") != "review" or report.get("verdict") not in {"pass", "needs-changes", "fail"} or final.get("subtype") != "success" or validation != [{"type": "codex_review_validation", "valid": True}]:
+            issues.append("validated structured report missing")
+            review_texts = []
+        else:
+            review_texts = [f"verdict: {report['verdict']}\nsession: {report.get('session_id', '')}\nrun: {report.get('run_dir', '')}"]
     if direct_route:
         hashes = read(trial.parent / "candidate-source-sha256.json")
         digest = hashes.get("scripts/direct-review-contract.md", hashes.get("agents/codex-orchestrator.md"))
@@ -249,7 +257,7 @@ def accounting(trial, entry, inventory, module, rates):
     if entry["arm"] == "plugin":
         try:
             route = getattr(module, "REVIEW_ROUTE", "delegated")
-            final, reviews, claude_cost, extra = claude_evidence(trial, route in {"direct-command", "hook-command", "compact-hook-command"}, route == "compact-hook-command")
+            final, reviews, claude_cost, extra = claude_evidence(trial, route in {"direct-command", "hook-command", "compact-hook-command", "structured-hook-command"}, route in {"compact-hook-command", "structured-hook-command"}, route == "structured-hook-command")
             issues.extend(extra)
         except Exception as error:
             claude_cost = None
@@ -306,7 +314,7 @@ def audit_trial(out, entry, inventory, module, rates):
         if score.get("policy_errors"):
             violations.append("effective_policy_mismatch")
         if entry["arm"] == "plugin":
-            if getattr(module, "REVIEW_ROUTE", "delegated") in {"direct-command", "hook-command", "compact-hook-command"}:
+            if getattr(module, "REVIEW_ROUTE", "delegated") in {"direct-command", "hook-command", "compact-hook-command", "structured-hook-command"}:
                 if final.get("subagent_stats", {}).get("spawned", 0) != 0:
                     failures.append("unexpected Claude delegation")
                 invocation = (trial / "attempt-1.input.txt").read_text()
@@ -319,6 +327,17 @@ def audit_trial(out, entry, inventory, module, rates):
             runs = sorted((repo / ".codex-dispatch/runs").glob("*/result.json"))
             if not 1 <= len(runs) <= 3:
                 raise ValueError("dispatch count outside retry budget")
+            if getattr(module, "REVIEW_ROUTE", "") == "structured-hook-command":
+                ledgers = list((repo / ".codex-dispatch/expansions").glob("*/*.runs.json"))
+                if len(ledgers) != 1:
+                    raise ValueError("current invocation ledger missing/ambiguous")
+                ledger = read(ledgers[0])
+                attempts = ledger["attempts"]
+                if len(attempts) != len(runs) or len(attempts) != final["structured_output"]["iterations"]:
+                    raise ValueError("reported/recorded/actual iteration counts differ")
+                for index, (attempt, path) in enumerate(zip(attempts, runs)):
+                    if attempt["state"] != "complete" or attempt["iteration"] != index + 1 or Path(attempt["run_dir"]).resolve() != path.parent.resolve() or attempt["session_id"] != read(path)["session_id"]:
+                        raise ValueError("invocation chain does not bind actual dispatches")
             terminal = read(runs[-1])
             if type(terminal.get("exit_code")) is not int or terminal["exit_code"] != 0:
                 failures.append("terminal dispatch did not succeed")

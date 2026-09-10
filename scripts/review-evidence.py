@@ -123,10 +123,55 @@ def collect():
     return bundle
 
 
+def collect_with_receipt():
+    raw = os.environ.get("REVIEW_RECEIPT_PATH")
+    if not raw:
+        return collect()  # Explicit legacy agent routes use the same collector.
+    receipt = Path(raw)
+    lock = receipt.with_suffix(".lock")
+    lock.mkdir()  # Concurrent/abandoned invocations fail closed.
+    try:
+        saved = json.loads(receipt.read_text())
+        identity = json.loads(os.environ["REVIEW_INVOCATION_ID"])
+        if saved["identity"] != identity or saved["status"] not in {"running", "complete"}:
+            raise ValueError("review invocation identity/status changed")
+        if any(os.environ.get(key, "") != value for key, value in saved["dispatch_env"].items()) or os.environ.get("CODEX_RESULT_DIR"):
+            raise ValueError("review request parameters changed")
+        ledger = receipt.with_suffix(".runs.json")
+        data = json.loads(ledger.read_text()) if ledger.exists() else {"identity": identity, "attempts": []}
+        attempts = data["attempts"]
+        if data["identity"] != identity or any(row["state"] != "complete" for row in attempts):
+            raise ValueError("review chain is incomplete or belongs to another invocation")
+        if len(attempts) >= saved["config"]["max_iter"]:
+            raise ValueError("review iteration budget exhausted")
+        session = os.environ.get("CODEX_SESSION_ID", "")
+        permitted = {""} if not attempts or saved["config"]["no_resume"] else {"", attempts[-1]["session_id"]}
+        if session not in permitted:
+            raise ValueError("review resumed a session outside the current chain")
+        def persist():
+            temp = ledger.with_suffix(".tmp")
+            temp.write_text(json.dumps(data, indent=2) + "\n")
+            os.replace(temp, ledger)
+        row = {"iteration": len(attempts) + 1, "state": "running", "resume_session": session}
+        attempts.append(row)
+        persist()  # Count the attempt before any dispatch or model work.
+        try:
+            bundle = collect()
+            row.update(state="complete", run_dir=bundle["run_dir"], session_id=bundle["result"]["session_id"])
+            persist()
+            return bundle
+        except BaseException as error:
+            row.update(state="failed", error=str(error))
+            persist()
+            raise
+    finally:
+        lock.rmdir()
+
+
 def main():
     try:
-        print(json.dumps(collect()))
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(json.dumps(collect_with_receipt()))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(json.dumps({"complete": False, "error": str(error)}))
         return 1
     return 0

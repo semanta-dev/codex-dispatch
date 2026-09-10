@@ -118,6 +118,59 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(bundle["result"]["exit_code"], 1)
         self.assertFalse((self.repo / "must-not-exist").exists())
 
+class ReceiptChainTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.receipt = Path(self.temp.name) / 'receipt.json'
+        self.identity = {'session_id': 'current', 'prompt_id': 'prompt', 'args_sha256': 'hash'}
+        env = {'REVIEW_RECEIPT_PATH': str(self.receipt), 'REVIEW_INVOCATION_ID': json.dumps(self.identity), 'CODEX_TASK': 'original task'}
+        self.receipt.write_text(json.dumps({'identity': self.identity, 'status': 'complete', 'dispatch_env': env, 'config': {'max_iter': 2, 'no_resume': False}}))
+        active = patch.dict(os.environ, env, clear=True)
+        active.start()
+        self.addCleanup(active.stop)
 
-if __name__ == "__main__":
+    def bundle(self, number):
+        return {'run_dir': f'run-{number}', 'result': {'session_id': f'codex-{number}'}}
+
+    def test_chain_counts_before_dispatch_binds_retries_and_enforces_budget(self):
+        def collect():
+            ledger = json.loads(self.receipt.with_suffix('.runs.json').read_text())
+            self.assertEqual(ledger['attempts'][-1]['state'], 'running')
+            return self.bundle(len(ledger['attempts']))
+        with patch.object(MODULE, 'collect', side_effect=collect) as call:
+            MODULE.collect_with_receipt()
+            os.environ['CODEX_SESSION_ID'] = 'codex-1'
+            MODULE.collect_with_receipt()
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                MODULE.collect_with_receipt()
+            self.assertEqual(call.call_count, 2)
+        attempts = json.loads(self.receipt.with_suffix('.runs.json').read_text())['attempts']
+        self.assertEqual([row['run_dir'] for row in attempts], ['run-1', 'run-2'])
+        self.assertEqual(attempts[1]['resume_session'], 'codex-1')
+
+    def test_changed_task_or_foreign_session_never_dispatches(self):
+        with patch.object(MODULE, 'collect') as call:
+            os.environ['CODEX_TASK'] = 'different task'
+            with self.assertRaisesRegex(ValueError, 'parameters'):
+                MODULE.collect_with_receipt()
+            os.environ['CODEX_TASK'] = 'original task'
+            os.environ['CODEX_SESSION_ID'] = 'unrelated-old-session'
+            with self.assertRaisesRegex(ValueError, 'outside'):
+                MODULE.collect_with_receipt()
+            call.assert_not_called()
+
+    def test_failed_attempt_is_retained_and_blocks_silent_reexecution(self):
+        with patch.object(MODULE, 'collect', side_effect=ValueError('capture failed')) as call:
+            with self.assertRaisesRegex(ValueError, 'capture failed'):
+                MODULE.collect_with_receipt()
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                MODULE.collect_with_receipt()
+            self.assertEqual(call.call_count, 1)
+        row = json.loads(self.receipt.with_suffix('.runs.json').read_text())['attempts'][0]
+        self.assertEqual(row['state'], 'failed')
+        self.assertEqual(row['iteration'], 1)
+
+
+if __name__ == '__main__':
     unittest.main()

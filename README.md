@@ -413,3 +413,10 @@ Plan A latency/cost qualification applies only to this compact profile after
 its benchmark gates pass. An existing-session `/codex` invocation inherits the
 session's thinking configuration and has no equivalent performance claim.
 Haiku does not support effort controls; `effort: low` is not a thinking limit.
+
+The compact profile requests a structured review report and validates it against
+the current command receipt, Codex session, run artifacts and requested checks
+before reporting success. Formatting retries are limited to one. A rejected or
+invalid review exits nonzero. In stream-json mode, preserve the raw Claude
+events and require both exit zero and the final `codex_review_validation` event
+with `valid: true`; a vendor completion event alone is insufficient.

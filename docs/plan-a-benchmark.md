@@ -166,3 +166,23 @@ Hook smoke v5 accepted all six cases per arm. Its median latency was 39.885s
 versus 22.599s direct; total model spend was $0.9191848 versus $0.732622. It
 failed economics and remains excluded from promotion. Complete evidence:
 `/tmp/plan-a-paired-smoke-v5`.
+
+Compact text smoke v6 accepted all twelve trials with thinking disabled, but
+still failed economics: median plugin 35.249s versus direct 20.868s; total spend
+$0.7168757 versus $0.494803. Haiku emitted long visible review narratives. This
+archive remains excluded: `/tmp/plan-a-paired-smoke-v6`.
+
+The next bounded candidate uses Claude's StructuredOutput tool and validates
+its report locally. The installed-CLI controlled-endpoint probe showed a valid
+tool response can finish in one API request; a prose-first response incurs an
+extra request. This is not an assumed performance win. The shipped profile pins
+`MAX_STRUCTURED_OUTPUT_RETRIES=1`; all formatting retries remain charged. The
+fixture adapter uses the same mechanism with verdict/reason fields only. It
+rejects implementation tools, missing structured output, and thinking blocks.
+
+Structured acceptance additionally requires an invocation ledger: every attempt
+is recorded before dispatch under the receipt identity, original request values
+remain fixed, resumes stay within that chain, and the final report's count and
+run/session must match its completed tail. An old successful run cannot satisfy
+a claimed retry. The independent paired audit reconciles the ledger with the
+actual run/session inventory, rather than trusting the model's iteration count.

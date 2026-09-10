@@ -271,3 +271,30 @@ Windows now passes all 91 native shell cases; the newly reached Python failure
 was a fixture assuming chmod creates POSIX execute bits on Windows. It now
 checks the source mode actually preserved, retaining the explicit POSIX 0755,
 native symlink and deletion checks.
+
+### Structured review candidate
+
+The compact text smoke v6 passed all twelve route/behavior audits, with zero
+thinking tokens, but still missed latency and cost gates. The CTO approved a
+bounded StructuredOutput experiment, with local schema/evidence validation and
+all formatting retries retained. The profile now validates its final report
+against the current command receipt and actual successful run before displaying
+human-readable success. Thirty-eight Python checks pass, including missing
+structured output, wrong session/prompt, invalid codes and failed verification.
+The actual Haiku fixture cohort remains unmeasured until the final profile is
+frozen; earlier standalone Sonnet scores do not close that gate.
+
+The structured validator's initial retry path was rejected in CTO review: an
+iteration-2 claim could point at unrelated old evidence. A receipt-bound ledger
+now records each attempt before dispatch, fixes original request parameters,
+checks resume ownership and budget, and requires the report to name the exact
+completed chain tail. Failed attempts remain recorded and block silent reruns.
+The previously demonstrated stale-run claim is rejected by regression tests.
+
+Windows run 34423362296 reached the interruption assertions successfully but
+teardown found output handles held by a descendant. The runner now launches
+owned process groups, synchronizes cancellation with spawn and completion,
+terminates/drains active process trees before exit 130, and blocks new launches
+and progress writes after cancellation. Local tests retain a real sleeping
+child and test cancellation during process launch. All 45 Python tests and 15
+plan-runner shell cases pass; native confirmation remains required.

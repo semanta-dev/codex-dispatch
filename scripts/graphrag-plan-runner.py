@@ -35,6 +35,48 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+ACTIVE_PROCESSES: set[subprocess.Popen] = set()
+PROCESS_LOCK = threading.RLock()
+CANCEL_REQUESTED = threading.Event()
+
+
+def stop_process_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        # Each child has its own console group, so CTRL_BREAK delivered to the
+        # runner cannot remove the parent before taskkill walks its descendants.
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.wait()
+
+
+def cancel_processes() -> None:
+    with PROCESS_LOCK:
+        CANCEL_REQUESTED.set()
+        processes = list(ACTIVE_PROCESSES)
+    for proc in processes:
+        stop_process_tree(proc)
+
+
+def run_process(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    with PROCESS_LOCK:
+        if CANCEL_REQUESTED.is_set():
+            return subprocess.CompletedProcess(argv, 130, "", "")
+        proc = subprocess.Popen(argv, **kwargs, **options)
+        ACTIVE_PROCESSES.add(proc)
+    try:
+        stdout, stderr = proc.communicate()
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    finally:
+        with PROCESS_LOCK:
+            ACTIVE_PROCESSES.discard(proc)
+
+
 class FileLockRegistry:
     """Per-file mutexes so disjoint single-tree packets dispatch in parallel.
 
@@ -406,7 +448,7 @@ Do not commit, branch, push, revert, stash, or mutate git history."""
 
 def run_shell(command: str, repo: pathlib.Path) -> dict[str, Any]:
     started = time.monotonic()
-    proc = subprocess.run(
+    proc = run_process(
         [bash_executable(), "-c", command],
         cwd=repo,
         text=True,
@@ -513,7 +555,7 @@ def dispatch_packet(
             allowed_path = allowed.name
         try:
             with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
-                proc = subprocess.run(
+                proc = run_process(
                     [*script_command(str(dispatch)), "--allowed-file", allowed_path],
                     cwd=repo,
                     env=env,
@@ -530,7 +572,7 @@ def dispatch_packet(
         # result.json file into the dir it prints on its last stdout line.
         dispatch_cmd = args.dispatch_command or str(plugin_root / "scripts" / "dispatch-codex.sh")
         with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
-            proc = subprocess.run(
+            proc = run_process(
                 script_command(dispatch_cmd),
                 cwd=repo,
                 env=env,
@@ -587,19 +629,24 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
         after = tree_state(repo, pathlib.Path(args.out).resolve())
         evidence = evaluate_evidence(proc.returncode, result_json, changed_paths(before, after),
                                      changed_paths(before, dispatched), allowed_for_dispatch, verification)
-        if evidence["accepted"] and args.write_progress:
-            write_progress_record(repo, packet, result_json, verification, args.isolation)
-        progress = repo / packet.progress_record
-        progress_valid = bool(packet.progress_record) and progress.is_file() and "Status: done" in progress.read_text().splitlines()
-        if evidence["accepted"] and not progress_valid:
-            evidence.update(accepted=False, reason="missing or invalid completion record")
-        if evidence["accepted"]:
-            evidence.update(version=2, files={p: fingerprint(repo / p) for p in packet.allowed_files + packet.input_files})
-            target = evidence_path(repo, packet)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temp = target.with_suffix(".tmp")
-            temp.write_text(json.dumps(evidence))
-            os.replace(temp, target)
+        # Commit completion before cancellation, or reject it after cancellation;
+        # never race a signal into a post-interruption progress write.
+        with PROCESS_LOCK:
+            if CANCEL_REQUESTED.is_set():
+                evidence.update(accepted=False, reason="interrupted")
+            if evidence["accepted"] and args.write_progress:
+                write_progress_record(repo, packet, result_json, verification, args.isolation)
+            progress = repo / packet.progress_record
+            progress_valid = bool(packet.progress_record) and progress.is_file() and "Status: done" in progress.read_text().splitlines()
+            if evidence["accepted"] and not progress_valid:
+                evidence.update(accepted=False, reason="missing or invalid completion record")
+            if evidence["accepted"]:
+                evidence.update(version=2, files={p: fingerprint(repo / p) for p in packet.allowed_files + packet.input_files})
+                target = evidence_path(repo, packet)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temp = target.with_suffix(".tmp")
+                temp.write_text(json.dumps(evidence))
+                os.replace(temp, target)
     finally:
         FileLockRegistry.release(held)
 
@@ -707,6 +754,7 @@ def select_wave(
 
 
 def run_plan(args: argparse.Namespace) -> int:
+    CANCEL_REQUESTED.clear()
     repo = pathlib.Path(args.repo).resolve()
     plugin_root = pathlib.Path(__file__).resolve().parents[1]
     out = pathlib.Path(args.out).resolve()
@@ -786,8 +834,11 @@ def run_plan(args: argparse.Namespace) -> int:
         # as KeyboardInterrupt so in-flight waves unwind; the except-block flush
         # below then rewrites the ledger with any records that fanned in during
         # the unwind, and that later atomic write is the authoritative one.
+        if interrupted["flag"]:
+            return  # A repeated interrupt must not interrupt child cleanup.
         interrupted["flag"] = True
         flush_ledger("interrupted", interrupted=True)
+        cancel_processes()
         raise KeyboardInterrupt
 
     previous_handlers = {}

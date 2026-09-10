@@ -14,11 +14,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = 'claude-haiku-4-5-20251001'
 ADAPTER = '''Evaluate exactly one reviewer decision using the supplied variables and bundle.
-Apply the trusted review-check section without dispatching, repairing, or running tools.
+Apply the trusted review-check section without dispatching, repairing, or running implementation tools.
 This is a decision evaluation; retry limits and final orchestration reports do not apply.
-Return only these two lines, with an empty reason for pass:
-VERDICT: <pass|needs-changes|fail>
-REASON: <reason>
+Call StructuredOutput with verdict and reason. Empty reason for pass.
+Emit no prose. Do not call any other tool.
 '''
 
 
@@ -60,7 +59,7 @@ def freeze(out):
     shutil.copy2(ROOT / 'scripts/compact-review-system.md', out / 'system.md')
     shutil.copy2(ROOT / 'scripts/codex-reviewed.py', out / 'profile.py')
     shutil.copy2(__file__, out / 'direct-fixtures.py')
-    dump(out / 'manifest.json', {'model': MODEL, 'thinking_tokens': 0, 'runs_per_fixture': 10, 'threshold': 8, 'source_root': str(ROOT),
+    dump(out / 'manifest.json', {'model': MODEL, 'thinking_tokens': 0, 'structured_output_retries': 1, 'runs_per_fixture': 10, 'threshold': 8, 'source_root': str(ROOT),
                                'contract_sha256': hashlib.sha256(contract.encode()).hexdigest(),
                                'candidate': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                                'fixtures': sorted(p.name for p in (out / 'fixtures').iterdir())})
@@ -102,6 +101,8 @@ def run(out):
     manifest = json.loads((out / 'manifest.json').read_text())
     profile.ROOT = Path(manifest['source_root'])
     command = profile.command('stream-json')
+    schema = {'type': 'object', 'properties': {'verdict': {'enum': ['pass', 'needs-changes', 'fail']}, 'reason': {'type': 'string', 'maxLength': 100}}, 'required': ['verdict', 'reason'], 'additionalProperties': False}
+    command[command.index('--json-schema') + 1] = json.dumps(schema)
     command[command.index('--system-prompt-file') + 1] = str(out / 'system.md')
     command += ['--append-system-prompt', (out / 'rubric.md').read_text() + '\n' + (out / 'adapter.md').read_text()]
     dump(out / 'command.json', command)
@@ -134,12 +135,12 @@ def run(out):
                 pass
             finals = [event for event in parsed if event.get('type') == 'result']
             final = finals[-1] if finals else {}
-            response = final.get('result', '')
-            got = judgment(response)
+            report = final.get('structured_output')
+            got = {key.upper(): value for key, value in report.items()} if isinstance(report, dict) and set(report) == {'verdict', 'reason'} and all(isinstance(value, str) for value in report.values()) else {}
             tools = [b for e in parsed for b in e.get('message', {}).get('content', []) if isinstance(b, dict) and b.get('type') == 'tool_use']
             usage = final.get('modelUsage', {})
             no_thinking = thinking_off(parsed, final, prefix)
-            okay = code == 0 and not final.get('is_error') and final.get('terminal_reason') == 'completed' and got == expected and set(usage) == {MODEL} and not tools and no_thinking
+            okay = bool(code == 0 and final.get('subtype') == 'success' and not final.get('is_error') and final.get('terminal_reason') == 'completed' and got == expected and set(usage) == {MODEL} and tools and all(tool.get('name') == 'StructuredOutput' for tool in tools) and no_thinking)
             dump(prefix.with_suffix('.judgment.json'), {'exit_code': code, 'expected': expected, 'got': got, 'match': okay, 'model_usage': usage})
             matched += okay
         results[name] = {'matched': matched, 'runs': 10, 'pass': matched >= 8}

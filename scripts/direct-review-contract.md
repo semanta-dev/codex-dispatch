@@ -90,6 +90,12 @@ all checks. Missing evidence or helper failure stops with fail / reviewer-error.
 
 ## Final report
 
+When StructuredOutput is available, submit it immediately once judgment is
+complete, with no prose. Use kind=review and the schema's report fields below;
+pass requires empty reason and feedback. For a background receipt, submit
+kind=background with its exact output. The structured tool replaces this text
+block. Do not narrate checks before calling it.
+
 Print only this block and concise feedback for a rejection:
 
 ```
