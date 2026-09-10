@@ -140,8 +140,8 @@ def render(report):
 def command(output_format, background=False):
     argv = ['claude', '--print', '--model', MODEL, '--plugin-dir', str(ROOT),
             '--system-prompt-file', str(ROOT / 'scripts/compact-review-system.md'),
-            '--tools', 'Skill,Bash,Read,Grep,Glob', '--strict-mcp-config', '--setting-sources', '',
-            '--permission-mode', 'dontAsk', '--allowedTools', 'Skill', 'Bash', 'Read', 'Grep', 'Glob',
+            '--tools', 'Bash', '--strict-mcp-config', '--setting-sources', '',
+            '--permission-mode', 'dontAsk', '--allowedTools', 'Bash',
             '--output-format', output_format, '--json-schema', json.dumps(BACKGROUND_SCHEMA if background else REPORT_SCHEMA)]
     if output_format == 'stream-json':
         argv.append('--verbose')

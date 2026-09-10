@@ -37,7 +37,7 @@ If codex appears to be solving a fundamentally different problem (e.g., asked fo
 
 This check takes precedence over individual unmet criteria: an unrelated solution needs a fresh session. An incomplete or buggy attempt at the requested solution remains `needs-changes / criterion-not-met`.
 
-Evaluate `bundle.diff`. For each line in `ACCEPTANCE`, state whether the diff addresses it. If any criterion is unaddressed:
+Evaluate `bundle.diff` against every line in `ACCEPTANCE`. Report only unmet criteria in feedback; do not narrate passing checks. If any criterion is unaddressed:
 - `verdict = needs-changes`, `reason = criterion-not-met`
 - Add each unmet criterion to feedback bullets
 

@@ -54,6 +54,8 @@ class CompactProfileTests(unittest.TestCase):
         self.assertIn('--verbose', command)
         self.assertIn('--strict-mcp-config', command)
         self.assertEqual(command[command.index('--model') + 1], PROFILE.MODEL)
+        self.assertEqual(command[command.index('--tools') + 1], 'Bash')
+        self.assertEqual(command[command.index('--allowedTools') + 1], 'Bash')
 
 class StructuredReportTests(unittest.TestCase):
     def setUp(self):
