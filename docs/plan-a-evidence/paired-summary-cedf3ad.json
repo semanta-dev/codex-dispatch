@@ -1,0 +1,76 @@
+{
+  "audit_errors": [],
+  "planned": 60,
+  "completed": 60,
+  "full_cohort": true,
+  "arms": {
+    "direct": {
+      "accepted": 30,
+      "total": 30,
+      "cost_complete": true,
+      "p95_seconds_accepted_nearest_rank": 32.0421018791385,
+      "max_seconds_accepted": 33.31286593992263,
+      "max_seconds_all_observed": 33.31286593992263,
+      "observed_human_code_repair_minutes": 0,
+      "known_token_totals_including_failures": {
+        "codex_tokens": {
+          "cached_input_tokens": 1024384,
+          "input_tokens": 1297457,
+          "output_tokens": 12173
+        },
+        "claude_tokens": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "thinkingTokens": 0
+        }
+      },
+      "median_seconds_accepted": 18.109663327923045,
+      "median_cost_accepted": 0.0723995,
+      "cost_per_accepted_including_failures": 0.07475823333333334,
+      "known_cost_lower_bound": 2.242747,
+      "failures": {}
+    },
+    "plugin": {
+      "accepted": 30,
+      "total": 30,
+      "cost_complete": true,
+      "p95_seconds_accepted_nearest_rank": 36.348515478894114,
+      "max_seconds_accepted": 44.17072267271578,
+      "max_seconds_all_observed": 44.17072267271578,
+      "observed_human_code_repair_minutes": 0,
+      "known_token_totals_including_failures": {
+        "codex_tokens": {
+          "cached_input_tokens": 1044224,
+          "input_tokens": 1327373,
+          "output_tokens": 12132
+        },
+        "claude_tokens": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "inputTokens": 101963,
+          "outputTokens": 1680,
+          "thinkingTokens": 0
+        }
+      },
+      "median_seconds_accepted": 21.792321305489168,
+      "median_cost_accepted": 0.0858555,
+      "cost_per_accepted_including_failures": 0.08040599999999999,
+      "known_cost_lower_bound": 2.4121799999999998,
+      "failures": {}
+    }
+  },
+  "gates": {
+    "complete_frozen_cohort": true,
+    "accepted_count": true,
+    "zero_critical": true,
+    "latency_ratio": 1.2033531993876376,
+    "latency_pass": true,
+    "cost_ratio": 1.0755470857836391,
+    "median_cost_ratio": 1.185857637138378,
+    "cost_pass": true,
+    "critical_rows": []
+  },
+  "paired_go": true
+}

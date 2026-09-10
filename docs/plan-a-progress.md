@@ -332,3 +332,18 @@ ARM, both macOS architectures, both Linux architectures, and snapshot/Bats.
 The setup-RPC shutdown cancellation race is covered by repeated focused tests.
 The new API candidate still requires its own complete validation and frozen
 native, reviewer-fixture and paired evidence before CTO promotion approval.
+
+### Final CTO promotion GO
+
+The first full frozen cohort at `cedf3ad` accepted 30/30 outcomes in both arms,
+with zero critical violations, complete accounting and zero human repair.
+Plugin/direct median latency ratio is 1.203353; all-spend per accepted task ratio
+is 1.075547. Both pass the unchanged 1.25 thresholds. All nine reviewer fixtures
+scored 10/10 with the exact API profile, and all nine hosted CI jobs passed at
+the measured commit. The CTO independently reran the full audit, obtained an
+exact matching summary, and issued explicit promotion GO for the documented
+API profile and named transport. Earlier failed/excluded smokes remain retained.
+
+See [promotion evidence](plan-a-promotion-evidence.md) for scope, tail latency,
+tokens, costs, raw archive paths and the recorded independent CTO decision.
+This documentation-only closeout does not alter the measured product.

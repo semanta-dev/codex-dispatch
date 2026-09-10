@@ -450,4 +450,8 @@ response, usage and decision records live beside the invocation receipt in a
 Plan A's current measurement candidate is this explicit API profile with the
 named localhost transport, Haiku 4.5, thinking disabled, and published-rate cost
 equivalents. The earlier CLI-profile smokes missed the economic thresholds.
-No profile has promotion approval until the full documented gates pass.
+The explicit API profile received CTO promotion GO at `cedf3ad`: 30/30 accepted,
+90/90 reviewer judgments, all nine CI jobs passing, and latency/cost overhead
+within the agreed 1.25x limits. This is a bounded synthetic qualification through
+the named transport. See [promotion evidence](docs/plan-a-promotion-evidence.md)
+for exact measurements, tail latency and limitations.

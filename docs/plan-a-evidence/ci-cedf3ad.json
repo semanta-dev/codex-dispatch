@@ -1,0 +1,62 @@
+{
+  "conclusion": "success",
+  "headSha": "cedf3ad11df58150f1387cb0be5e8f2d5c77d7ce",
+  "jobs": [
+    {
+      "name": "go",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713057848"
+    },
+    {
+      "name": "native (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713057969"
+    },
+    {
+      "name": "shell",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713058001"
+    },
+    {
+      "name": "native (windows-11-arm)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713058016"
+    },
+    {
+      "name": "native (macos-15)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713058021"
+    },
+    {
+      "name": "native (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713058041"
+    },
+    {
+      "name": "native (ubuntu-24.04-arm)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713058118"
+    },
+    {
+      "name": "native (macos-15-intel)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102713058187"
+    },
+    {
+      "name": "snapshot-and-bats",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509/job/102714888385"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/semanta-dev/codex-dispatch/actions/runs/34426597509"
+}

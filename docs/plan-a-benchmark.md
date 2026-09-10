@@ -86,7 +86,8 @@ Ten fresh fixture repetitions per size, same Linux host and toolchain, using
 | 10,000 | 1.977 seconds | 2.082 seconds |
 
 Raw output: `/tmp/plan-a-snapshot-benchmark-10.txt`. The ten-percent live-task
-comparison remains pending the full paired corpus.
+comparison is complete: 1.6% (1,000 files) and 9.1% (10,000 files) of the
+full-cohort plugin median. See [final evidence](plan-a-promotion-evidence.md).
 
 ## Paired executable protocol
 
@@ -200,3 +201,13 @@ The excluded v8 two-trial transport probe accepted both C01 results using the
 real API and receipt-bound StructuredOutput validation. Direct: 13.95 seconds
 and $0.06121; plugin: 29.73 seconds and $0.0834432. The schema compatibility
 repair worked, but this probe does not establish economics or promotion.
+
+## Final promotion result
+
+The first full cohort at `cedf3ad` passed every unchanged gate and received
+independent CTO promotion GO. The exact API profile scored 90/90 reviewer
+judgments; hosted CI passed all nine jobs. The full 30+30 cohort accepted every
+trial, with latency ratio 1.203353 and all-spend/accepted cost ratio 1.075547.
+The earlier smoke and standalone reviewer results above remain historical,
+excluded evidence. [Final evidence and scope](plan-a-promotion-evidence.md) is
+the authoritative promotion record.
