@@ -304,11 +304,9 @@ func TestIdleOutDoesNotKillLongRunningDispatch(t *testing.T) {
 		t.Fatalf("long dispatch exit_code = %d, want 0", res.ExitCode)
 	}
 
-	// The broker must still be alive after a turn that outlived several idle
-	// windows: ping must succeed.
-	if _, err := client.Ping(context.Background()); err != nil {
-		t.Fatalf("broker not alive after long dispatch (it exited on idle-out): %v", err)
-	}
+	// Successful completion proves the broker survived every idle window
+	// while the task was running. Once terminal, a 40ms idle-out is valid;
+	// a follow-up ping can legitimately arrive after that deadline on CI.
 }
 
 // TestShutdownDrainsDetachedRunBeforeClosingChild verifies that broker shutdown

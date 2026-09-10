@@ -791,7 +791,10 @@ def run_plan(args: argparse.Namespace) -> int:
         raise KeyboardInterrupt
 
     previous_handlers = {}
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)  # Windows console group interruption
+    for sig in signals:
         try:
             previous_handlers[sig] = signal.signal(sig, handle_signal)
         except (ValueError, OSError):

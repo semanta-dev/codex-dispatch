@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -938,13 +939,14 @@ func TestUnknownServerRequestStillAnswered(t *testing.T) {
 // but never answers initialize; with a short ctx, Spawn must return an error AND
 // leave no extra goroutines/processes behind (NumGoroutine returns to baseline).
 func TestSpawnFailureReapsChild(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a unix shell child")
-	}
-	// `sh -c 'cat'` reads stdin forever and never speaks the protocol, so the
+	// The test child reads stdin forever and never speaks the protocol, so the
 	// initialize handshake times out — modelling a hung/misbehaving codex.
 	base := runtime.NumGoroutine()
-	a := New("sh", []string{"-c", "cat"}, nil, "")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(exe, []string{"-test.run=^TestSilentHandshakeChild$"}, append(os.Environ(), "CODEX_TEST_SILENT_CHILD=1"), "")
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	if err := a.Spawn(ctx); err == nil {
@@ -970,9 +972,6 @@ func TestSpawnFailureReapsChild(t *testing.T) {
 // path EnsureAppServer takes when recycling a dead instance. A leak in the reader
 // or per-turn pump would show as monotonically rising NumGoroutine.
 func TestRecycleNoGoroutineGrowth(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a unix shell child indirectly")
-	}
 	const cycles = 100
 
 	runOne := func() {
@@ -1197,4 +1196,12 @@ func waitGoroutines(t *testing.T, base int, timeout time.Duration) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func TestSilentHandshakeChild(t *testing.T) {
+	if os.Getenv("CODEX_TEST_SILENT_CHILD") != "1" {
+		return
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	os.Exit(0)
 }

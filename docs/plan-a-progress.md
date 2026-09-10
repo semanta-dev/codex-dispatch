@@ -199,3 +199,34 @@ The zero-text-line no-changes heuristic was removed from all four review routes;
 binary and mode-only edits remain meaningful. Seventeen Python regressions and
 six clean-verify Bats cases pass locally. CTO bounded recheck found no further
 blocker in these corrections; promotion GO remains pending live/native gates.
+
+### Direct-review smoke and native coverage checkpoint
+
+The immutable nine-fixture reviewer cohort in
+`/tmp/plan-a-reviewer-20260909-v4` completed successfully: every fixture scored
+10/10, including binary deletion and mode-only changes. The original failed
+reviewer and harness evaluations remain preserved.
+
+Hosted run 34419044616 passed Go race/lint, shell, Linux and both macOS native
+jobs. Windows x64 failed the interruption shell fixture; Windows arm64 exposed
+a test that incorrectly required a ping after the valid idle deadline. Repairs
+use native CTRL_BREAK interruption and assert survival through active dispatch.
+Additional Windows tests now run rather than skip vendor lookup, handshake,
+detached setup, prompt parity and goroutine recycling. Local race tests, lint,
+Windows cross-compilation, shell checks and 25 Python regressions pass; native
+execution of these changes remains required.
+
+The bundled delegated smoke v3 passed all twelve behavior/route audits but
+missed economics: median latency 61.653s versus 16.655s direct (3.70x), total
+model spend $1.0405399 versus $0.448473. These are excluded smoke observations.
+Direct-command smoke v4 loaded the exact contract on Haiku but bypassed Codex,
+edited the task file itself, and claimed success without a run/session. Its
+31.26s result is rejected as false completion, not credited as an improvement.
+Evidence is preserved in `/tmp/plan-a-paired-smoke-v4`, including the persisted
+command transcript. Promotion remains CTO NO-GO. The next architecture under
+investigation dispatches deterministically before independent review inference.
+
+The auditor now retains failed-attempt spend, unknown-cost vetoes, all planned
+rows and typed safety violations, and verifies actual contract expansion.
+Median individual task cost is diagnostic; the fixed economic gate remains
+total model spend divided by accepted tasks, at most 1.25x direct.

@@ -200,9 +200,6 @@ func TestCaptureDiffOneArgIsError(t *testing.T) {
 }
 
 func TestRunDispatchEndToEnd(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver requires posix exec/signal handling")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -220,6 +217,9 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 	// Build fake-appserver as `codex` and put it first on PATH.
 	fakeDir := t.TempDir()
 	bin := filepath.Join(fakeDir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	bcmd := exec.Command("go", "build", "-o", bin, ".")
 	bcmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := bcmd.CombinedOutput(); err != nil {
@@ -408,7 +408,7 @@ func installStubCodex(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "codex")
 	if runtime.GOOS == "windows" {
-		bin += ".bat"
+		bin += ".exe"
 	}
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), fs.FileMode(0o755)); err != nil {
 		t.Fatalf("write stub codex: %v", err)
@@ -421,9 +421,6 @@ func installStubCodex(t *testing.T) {
 // task.start is rejected because the broker registers only broker.ping), the
 // run dir we created must be removed, not left behind.
 func TestDetachFailedSetupLeavesNoOrphanDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("broker fixture requires posix exec/signal handling")
-	}
 	// Stub codex on PATH so Validate passes and execution reaches PrepareRunDir
 	// (which creates the run dir we then assert is cleaned up). Without this the
 	// test is environment-dependent: it would pass trivially via ErrCodexNotFound
@@ -501,9 +498,6 @@ func TestDetachFailedSetupLeavesNoOrphanDir(t *testing.T) {
 // operator-supplied CODEX_RESULT_DIR that already existed before the run, even
 // when detached setup fails.
 func TestDetachPreexistingResultDirPreserved(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("broker fixture requires posix exec/signal handling")
-	}
 	// Stub codex on PATH so Validate passes and execution reaches PrepareRunDir,
 	// exercising the cleanup path (which must preserve the pre-existing dir)
 	// rather than bailing out early via ErrCodexNotFound.
@@ -638,9 +632,6 @@ func TestBrokerSubcommandRoutes(t *testing.T) {
 // This is the regression guard for the bug where --detach sent only
 // task+acceptance and silently dropped the rest of the prompt.
 func TestDetachPromptParity(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver requires posix exec/signal handling")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -659,6 +650,9 @@ func TestDetachPromptParity(t *testing.T) {
 	// dispatch can run end-to-end and write prompt.txt.
 	fakeDir := t.TempDir()
 	bin := filepath.Join(fakeDir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	bcmd := exec.Command("go", "build", "-o", bin, ".")
 	bcmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := bcmd.CombinedOutput(); err != nil {

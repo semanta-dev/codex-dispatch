@@ -29,7 +29,7 @@ codex --version   # must report >= 0.130.0
 /codex add a --json flag to cmd/list that prints the results as a JSON array
 ```
 
-`/codex` derives acceptance criteria, asks Codex to implement, reviews the diff with a Claude subagent, and iterates until it passes or hits the iteration cap.
+`/codex` derives acceptance criteria, asks Codex to implement, reviews the diff directly with Claude Haiku, and iterates until it passes or hits the iteration cap.
 
 **4. Read the result.** A successful run ends with a block like:
 
@@ -56,7 +56,7 @@ Codex's edits land directly in your working tree. The plugin never commits, bran
 
 ## What it does
 
-- `/codex <task>` — slash command that dispatches Codex on a task, reviews the diff with a Claude subagent, and iterates until the work passes review or the iteration cap is hit.
+- `/codex <task>` — slash command that dispatches Codex on a task, reviews the diff directly with Claude Haiku, and iterates until the work passes review or the iteration cap is hit.
 - `/codex-orchestrate <task-or-plan>` — route selector that lets Claude choose Codex-authored GraphRAG spec/plan drafting, `/codex`, one GraphRAG packet, full-plan fanout, shared-broker cost mode, or direct Claude handling based on task shape.
 - `/graphrag-codex-plan <feature>` — dispatches Codex to write GraphRAG spec and packet plan docs under `docs/graphrag/`, then uses Claude review before any implementation runs.
 - `/graphrag-codex <plan> [packet]` — GraphRAG packet bridge that executes exactly one `graphrag-codex-planner` packet through the same Codex implementation loop.

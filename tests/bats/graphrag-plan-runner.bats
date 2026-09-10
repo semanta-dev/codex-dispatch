@@ -461,7 +461,12 @@ case "$CODEX_TASK" in
   *"Packet 002"*)
     # Interrupt the plan-runner (our parent) mid-run, then exit so the worker
     # thread does not hang the executor shutdown.
-    kill -INT "$PPID" 2>/dev/null || true
+    if [ -n "${RUNNER_WINDOWS_INTERRUPT_MARKER:-}" ]; then
+      touch "$RUNNER_WINDOWS_INTERRUPT_MARKER"
+      sleep 10
+    else
+      kill -INT "$PPID" 2>/dev/null || true
+    fi
     sleep 0.2
     exit 1
     ;;
@@ -522,8 +527,49 @@ Progress record:
 `docs/graphrag/progress/002-two.done.md`
 EOF
 
-  run "$RUNNER" docs/graphrag/plans/sigint.plan.md --out sigint-out --jobs 1 \
-    --dispatch-command "$sigint_dispatch"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      cat > native-interrupt.py <<'PYINTERRUPT'
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+# Give the runner a real console process group so CTRL_BREAK reaches native
+# Python. Git Bash kill uses a different PID namespace and is not equivalent.
+kernel = ctypes.windll.kernel32
+if not kernel.GetConsoleWindow():
+    if not kernel.AllocConsole():
+        raise ctypes.WinError()
+marker = Path(".codex-dispatch/interrupt-ready").resolve()
+env = {**os.environ, "RUNNER_WINDOWS_INTERRUPT_MARKER": marker.as_posix()}
+proc = subprocess.Popen([sys.executable, *sys.argv[1:]], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+try:
+    deadline = time.monotonic() + 30
+    while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(.05)
+    if not marker.exists():
+        raise RuntimeError("second wave never became ready for interruption")
+    proc.send_signal(signal.CTRL_BREAK_EVENT)
+    stdout, stderr = proc.communicate(timeout=30)
+    print(stdout, end="")
+    print(stderr, end="", file=sys.stderr)
+    sys.exit(proc.returncode)
+finally:
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+PYINTERRUPT
+      run python3 native-interrupt.py "$RUNNER" docs/graphrag/plans/sigint.plan.md --out sigint-out --jobs 1 --dispatch-command "$sigint_dispatch"
+      ;;
+    *)
+      run "$RUNNER" docs/graphrag/plans/sigint.plan.md --out sigint-out --jobs 1 --dispatch-command "$sigint_dispatch"
+      ;;
+  esac
   # Interrupted runs return 130.
   [ "$status" -eq 130 ]
   [ -f sigint-out/ledger.json ]

@@ -24,6 +24,7 @@ os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 MODEL = "gpt-5.5"
 ROUTER = "claude-haiku-4-5-20251001"
+REVIEW_ROUTE = "direct-command"
 CASES = {
     "C01": ("Create hello.txt containing exactly hello followed by a newline.", ["hello.txt"]),
     "C02": ("Append task followed by a newline to notes.txt. Preserve every existing byte.", ["notes.txt"]),
@@ -136,7 +137,7 @@ def freeze(out, pricing_source):
     product_hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in git(ROOT, "ls-files", "-z").decode().split("\0") if name and (ROOT / name).is_file()}
     dump(out / "candidate-source-sha256.json", product_hashes)
     manifest = {"version": 1, "candidate": git(ROOT, "rev-parse", "HEAD").decode().strip(),
-                "model": MODEL, "reasoning": "medium", "router_model": ROUTER, "router_effort": "low", "claude_tools": ["Agent", "Skill", "Bash", "Read", "Grep", "Glob"],
+                "model": MODEL, "reasoning": "medium", "router_model": ROUTER, "review_route": REVIEW_ROUTE, "router_effort": "low", "claude_tools": ["Skill", "Bash", "Read", "Grep", "Glob"],
                 "sandbox": "workspace-write", "approval": "never", "mcp": "none",
                 "max_attempts": 3, "timeout_seconds_per_trial": 600,
                 "retry_policy": "direct explicit resume with deterministic oracle feedback; plugin advertised inline review loop",
@@ -153,16 +154,19 @@ def freeze(out, pricing_source):
 
 
 def invoke(command, prompt, cwd, env, prefix, timeout):
+    dump(prefix.with_suffix(".started.json"), {"unix_seconds": time.time(), "cwd": str(cwd)})
     dump(prefix.with_suffix(".command.json"), command)
     prefix.with_suffix(".input.txt").write_text(prompt)
     with prefix.with_suffix(".stdout.jsonl").open("w") as stdout, prefix.with_suffix(".stderr.txt").open("w") as stderr:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr, cwd=cwd, env=env, text=True, start_new_session=True)
         try:
             process.communicate(prompt, timeout=max(1, timeout))
+            dump(prefix.with_suffix(".termination.json"), {"exit_code": process.returncode, "timeout": False})
             return process.returncode
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+            dump(prefix.with_suffix(".termination.json"), {"exit_code": 124, "timeout": True})
             return 124
 
 
@@ -197,54 +201,78 @@ def execute(out, limit):
         repo = trial / "repo"
         case = entry["case"]
         started = time.monotonic()
+        dump(trial / "started.json", {"unix_seconds": time.time(), "name": entry["name"]})
         statuses = []
         session = None
-        for attempt in range(1, 4):
-            if entry["arm"] == "plugin":
-                command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model", ROUTER,
-                           "--plugin-dir", str(ROOT), "--tools", "Agent,Skill,Bash,Read,Grep,Glob", "--effort", "low", "--strict-mcp-config", "--setting-sources", "", "--permission-mode", "dontAsk",
-                           "--allowedTools", "Task", "Agent", "Skill", "Bash", "Read", "Grep", "Glob"]
-                prompt = (trial / "plugin-prompt.txt").read_text()
-            else:
-                command = ["codex", "exec", "--json", "-m", MODEL, "-c", 'approval_policy="never"']
-                if session:
-                    command += ["resume", session, "-"]
+        errors = []
+        exception = None
+        try:
+            for attempt in range(1, 4):
+                if entry["arm"] == "plugin":
+                    command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model", ROUTER,
+                               "--plugin-dir", str(ROOT), "--tools", "Skill,Bash,Read,Grep,Glob", "--effort", "low", "--strict-mcp-config", "--setting-sources", "", "--permission-mode", "dontAsk",
+                               "--allowedTools", "Skill", "Bash", "Read", "Grep", "Glob"]
+                    prompt = (trial / "plugin-prompt.txt").read_text()
                 else:
-                    command += ["-s", "workspace-write", "-C", str(repo / entry["workdir"]), "-"]
-                prompt = (trial / "direct-prompt.txt").read_text() if attempt == 1 else "Verification failed. Repair only these errors and verify again:\n" + "\n".join(errors)
-            prefix = trial / f"attempt-{attempt}"
-            code = invoke(command, prompt, repo / entry["workdir"], env, prefix, 600 - (time.monotonic() - started))
-            statuses.append(code)
-            errors = oracle(case, repo)
-            dump(trial / f"verification-{attempt}.json", errors)
-            if entry["arm"] == "plugin" or code == 124 or not errors:
-                break
-            for line in prefix.with_suffix(".stdout.jsonl").read_text().splitlines():
+                    command = ["codex", "exec", "--json", "-m", MODEL, "-c", 'approval_policy="never"']
+                    if session:
+                        command += ["resume", session, "-"]
+                    else:
+                        command += ["-s", "workspace-write", "-C", str(repo / entry["workdir"]), "-"]
+                    prompt = (trial / "direct-prompt.txt").read_text() if attempt == 1 else "Verification failed. Repair only these errors and verify again:\n" + "\n".join(errors)
+                prefix = trial / f"attempt-{attempt}"
+                code = invoke(command, prompt, repo / entry["workdir"], env, prefix, 600 - (time.monotonic() - started))
+                statuses.append(code)
+                errors = oracle(case, repo)
+                dump(trial / f"verification-{attempt}.json", errors)
+                if entry["arm"] == "plugin" or code == 124 or not errors:
+                    break
+                for line in prefix.with_suffix(".stdout.jsonl").read_text().splitlines():
+                    try:
+                        event = json.loads(line)
+                        if event.get("type") == "thread.started":
+                            session = event.get("thread_id")
+                    except ValueError:
+                        pass
+                if not session:
+                    break
+        except Exception as error:
+            exception = f"{type(error).__name__}: {error}"
+        finally:
+            elapsed = time.monotonic() - started
+            cleanup_started = time.monotonic()
+            # Stop the trial's broker before final state and usage collection.
+            # Its subprocess tree is part of this trial, never another checkout.
+            pidfile = repo / ".codex-dispatch/broker.pid"
+            if pidfile.exists():
                 try:
-                    event = json.loads(line)
-                    if event.get("type") == "thread.started":
-                        session = event.get("thread_id")
-                except ValueError:
+                    os.kill(int(pidfile.read_text()), signal.SIGTERM)
+                    deadline = time.monotonic() + 10
+                    while pidfile.exists() and time.monotonic() < deadline:
+                        time.sleep(.05)
+                    if pidfile.exists():
+                        exception = (exception or "") + "; broker did not quiesce"
+                except ProcessLookupError:
                     pass
-            if not session:
-                break
-        elapsed = time.monotonic() - started
-        after = state(repo)
-        before = json.loads((trial / "before.json").read_text())
-        outside = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k) and k not in CASES[case][1])
-        dump(trial / "after.json", after)
-        dump(trial / "outcome.json", {"case": case, "arm": entry["arm"], "seconds": elapsed, "statuses": statuses, "oracle_errors": errors, "outside_changes": outside,
-                                      "index_preserved": git(repo, "ls-files", "--stage", "-z") == (trial / "before-index-entries").read_bytes(),
-                                      "behavior_accepted": not errors and not outside and statuses[-1] == 0,
-                                      "promotion_accepted": False, "unverified": ["route and artifact recovery audit", "usage and account pricing reconciliation"]})
-        print(entry["name"], f"{elapsed:.2f}s", statuses, errors, outside, flush=True)
-        # Broker artifacts remain; stop the process after measurement.
-        pidfile = repo / ".codex-dispatch/broker.pid"
-        if pidfile.exists():
+                except Exception as error:
+                    exception = (exception or "") + f"; broker cleanup: {error}"
+            cleanup_seconds = time.monotonic() - cleanup_started
+            after = None
+            outside = []
+            index_preserved = False
             try:
-                os.kill(int(pidfile.read_text()), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+                after = state(repo)
+                before = json.loads((trial / "before.json").read_text())
+                outside = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k) and k not in CASES[case][1])
+                dump(trial / "after.json", after)
+                index_preserved = git(repo, "ls-files", "--stage", "-z") == (trial / "before-index-entries").read_bytes()
+            except Exception as error:
+                exception = (exception or "") + f"; final-state audit: {error}"
+            dump(trial / "outcome.json", {"case": case, "arm": entry["arm"], "seconds": elapsed, "cleanup_seconds": cleanup_seconds, "statuses": statuses, "oracle_errors": errors,
+                  "outside_changes": outside, "index_preserved": index_preserved, "exception": exception,
+                  "behavior_accepted": not exception and after is not None and not errors and not outside and bool(statuses) and statuses[-1] == 0,
+                  "promotion_accepted": False, "unverified": ["independent acceptance and cost audit"]})
+            print(entry["name"], f"{elapsed:.2f}s", statuses, errors, outside, exception, flush=True)
 
 
 def main():
