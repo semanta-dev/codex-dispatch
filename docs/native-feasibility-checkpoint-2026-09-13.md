@@ -47,15 +47,30 @@ unqualified and NO-GO.
 
 ### Per-platform Go test counts across these runs
 
-| Platform | `8f9611d` (before) | `bdaf2ed` (after) |
+| Platform | `8f9611d` (before) | `95edc78` (after) |
 |---|---|---|
 | Linux amd64 / arm64 | pass | pass |
 | macOS amd64 / arm64 | 18 failures | pass |
-| Windows amd64 | 1 failure | pending in-flight run |
-| Windows arm64 | 54 failures | 53 failures |
+| Windows amd64 | 1 failure | pass |
+| Windows arm64 | 54 failures | pass |
 
-Windows arm64 is dominated by a separate pre-existing defect that is not path
-resolution: Git reports `fatal: unable to access 'NUL': Invalid argument` from
-`git rev-parse --show-toplevel`, failing 36 `internal/diff` and 15
-`internal/dispatch` tests. That count was 54 before this work and 53 after, so it
-is untouched by the resolution fix and remains open native debt.
+Windows arm64 was dominated by a second, unrelated defect: `os.DevNull` is the
+`NUL` device on Windows and was supplied to Git as a path for `core.hooksPath`,
+`GIT_CONFIG_SYSTEM` and `GIT_CONFIG_GLOBAL`. That Git build cannot stat the device
+when it names a config file, so `git rev-parse --show-toplevel` aborted with
+`fatal: unable to access 'NUL': Invalid argument` and baseline capture never ran,
+failing 36 `internal/diff` and 15 `internal/dispatch` tests.
+
+Windows now uses a real empty file, which is semantically identical for these
+settings, and sets `GIT_CONFIG_NOSYSTEM=1` so the system config is never opened.
+POSIX still uses `os.DevNull`. This could not be reproduced on Linux, where Git
+tolerates the missing path; it was confirmed on a native runner. CI run
+[34788133761](https://github.com/semanta-dev/codex-dispatch/actions/runs/34788133761)
+shows Windows arm64 going from 53 Go failures to zero, with no remaining `NUL`
+errors, and amd64 holding at zero.
+
+All six platforms now pass `native Go tests`. The remaining native failures are
+the `native shell and failure-injection gates` and `Adversarial remediation
+regression gates` steps on macOS and Windows, which depend on confined
+verification that is implemented for Linux only. That is unchanged qualification
+debt, and native execution remains unqualified.
