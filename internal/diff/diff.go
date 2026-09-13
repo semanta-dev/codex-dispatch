@@ -17,9 +17,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/semanta-dev/codex-dispatch/internal/artifact"
@@ -207,11 +209,30 @@ func gitCommand(workdir, indexFile, objectDir string, args ...string) *exec.Cmd 
 	return gitCommandContext(context.Background(), workdir, indexFile, objectDir, args...)
 }
 
+// emptyConfigPath is a path Git can stat and read as an empty file. On Windows
+// os.DevNull is "NUL", a device some Git for Windows builds cannot stat when it
+// is supplied as a config or hooks path: they abort every command with
+// "unable to access 'NUL': Invalid argument". An empty regular file is
+// semantically identical to /dev/null for these settings and is portable.
+var emptyConfigPath = sync.OnceValue(func() string {
+	if runtime.GOOS != "windows" {
+		return os.DevNull
+	}
+	f, err := os.CreateTemp("", "codex-dispatch-empty-*.config")
+	if err != nil {
+		return os.DevNull // Fall back rather than failing the capture outright.
+	}
+	name := f.Name()
+	f.Close()
+	return name
+})
+
 func gitCommandContext(ctx context.Context, workdir, indexFile, objectDir string, args ...string) *exec.Cmd {
 	if objectDir != "" {
 		args = append([]string{"-c", "core.splitIndex=false"}, args...)
 	}
-	full := append([]string{"--no-replace-objects", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-c", "protocol.allow=never"}, args...)
+	empty := emptyConfigPath()
+	full := append([]string{"--no-replace-objects", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + empty, "-c", "protocol.allow=never"}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.WaitDelay = time.Second
 	cmd.Dir = workdir
@@ -220,7 +241,9 @@ func gitCommandContext(ctx context.Context, workdir, indexFile, objectDir string
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+	// GIT_CONFIG_NOSYSTEM also stops Git opening the system config path at all,
+	// which scripts/windows_evidence.py already sets and the Go path did not.
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM="+empty, "GIT_CONFIG_GLOBAL="+empty, "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
 	if indexFile != "" {
 		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+indexFile)
 	}
