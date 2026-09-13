@@ -164,8 +164,14 @@ func TestRunHappyPathWritesResultJSON(t *testing.T) {
 	if i := strings.LastIndex(out, "\n"); i >= 0 {
 		last = out[i+1:]
 	}
-	if last != filepath.Join(repo, "run") {
-		t.Fatalf("last stdout line = %q, want %q", last, env.ResultDir)
+	// Run reports the resolved result directory: on macOS the temporary repo is
+	// reached through /var -> /private/var.
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(repo, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last != wantDir {
+		t.Fatalf("last stdout line = %q, want %q", last, wantDir)
 	}
 	raw, err := os.ReadFile(filepath.Join(env.ResultDir, "result.json"))
 	if err != nil {

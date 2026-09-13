@@ -296,8 +296,14 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 	if i := strings.LastIndex(last, "\n"); i >= 0 {
 		last = last[i+1:]
 	}
-	if last != filepath.Join(repo, "run") {
-		t.Fatalf("stdout last line = %q, want %q", last, filepath.Join(repo, "run"))
+	// dispatch reports the resolved result directory: on macOS the temporary repo
+	// is reached through /var -> /private/var.
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(repo, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last != wantDir {
+		t.Fatalf("stdout last line = %q, want %q", last, wantDir)
 	}
 }
 

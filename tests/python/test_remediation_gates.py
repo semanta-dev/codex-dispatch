@@ -24,7 +24,7 @@ class DevelopmentGateTests(unittest.TestCase):
                 for output in [repo, base, repo / 'new-output', alias / 'output']:
                     with self.subTest(output=output), self.assertRaisesRegex(ValueError, 'outside'):
                         gate.validate_output(output)
-                self.assertEqual(gate.validate_output(base / 'evidence'), base / 'evidence')
+                self.assertEqual(gate.validate_output(base / 'evidence'), (base / 'evidence').resolve())
 
     def test_worktree_changes_invalidate_manifest_without_index_change(self):
         with tempfile.TemporaryDirectory() as temporary:
