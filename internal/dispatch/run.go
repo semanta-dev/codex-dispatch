@@ -282,40 +282,58 @@ func handleCanceled(ctx context.Context, runErr error, resultDir, logPath string
 }
 
 func ensureResultDir(env Env, repoRoot string) (string, error) {
-	checkPath := func(path string) error {
-		path, err := filepath.Abs(path)
-		if err != nil {
-			return err
-		}
-		volume := filepath.VolumeName(path)
-		current := volume + string(filepath.Separator)
-		for _, part := range strings.Split(strings.TrimPrefix(path, current), string(filepath.Separator)) {
-			if part == "" {
-				continue
-			}
-			current = filepath.Join(current, part)
-			info, err := os.Lstat(current)
-			if err == nil && info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("result directory path contains symlink: %s", current)
-			}
-			if err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-		return nil
-	}
-	makePrivate := func(path string) (string, error) {
+	// Resolve the requested path before validating it. A symlink anywhere in the
+	// chain must not silently redirect artifacts, but platform-owned ancestor
+	// links are legitimate: on macOS every temporary directory is reached
+	// through /var -> /private/var. Validating the resolved location keeps the
+	// redirect protection while remaining usable on that platform.
+	resolve := func(path string) (string, error) {
 		path, err := filepath.Abs(path)
 		if err != nil {
 			return "", err
 		}
-		if err := checkPath(path); err != nil {
+		var pending []string
+		current := path
+		for {
+			resolved, evalErr := filepath.EvalSymlinks(current)
+			if evalErr == nil {
+				for i := len(pending) - 1; i >= 0; i-- {
+					resolved = filepath.Join(resolved, pending[i])
+				}
+				return resolved, nil
+			}
+			if !os.IsNotExist(evalErr) {
+				return "", evalErr
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				return "", fmt.Errorf("cannot resolve result directory %s", path)
+			}
+			pending = append(pending, filepath.Base(current))
+			current = parent
+		}
+	}
+	makePrivate := func(path string) (string, error) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		// The caller's own leaf must never be a link: silently redirecting the
+		// export destination is worse than refusing it. Ancestor links are
+		// resolved below because platforms own some of them.
+		if info, lerr := os.Lstat(abs); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("result directory is a symlink: %s", abs)
+		}
+		path, err = resolve(abs)
+		if err != nil {
 			return "", err
 		}
 		_, statErr := os.Lstat(path)
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return "", err
 		}
+		// The final component must be a real directory, never a link. Reject a
+		// leaf that a child replaced between resolution and creation.
 		info, err := os.Lstat(path)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return "", fmt.Errorf("result directory is not a regular directory")

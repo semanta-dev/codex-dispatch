@@ -39,6 +39,47 @@ func TestTemporaryRootCannotGrantAuthorityAccess(t *testing.T) {
 	}
 }
 
+// Reproduces the macOS /var -> /private/var condition on any platform: when the
+// authority root itself is reached through a symlinked ancestor, the overlap must
+// still be detected. Resolving only the temporary side accepted a real overlap.
+func TestSymlinkedAncestorStillDetectsOverlap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX ancestor symlink semantics")
+	}
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	root := filepath.Join(real, "authority")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Reach the same authority root through a symlinked ancestor, the way macOS
+	// reaches every temporary directory through /var.
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	aliased := filepath.Join(link, "authority")
+	for _, temporary := range []string{root, aliased, filepath.Join(aliased, "nested")} {
+		if err := os.MkdirAll(temporary, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectTemporaryOverlap(aliased, temporary); err == nil {
+			t.Fatalf("accepted overlapping temporary root %s through symlinked ancestor", temporary)
+		}
+		if err := rejectTemporaryOverlap(root, temporary); err == nil {
+			t.Fatalf("accepted overlapping temporary root %s against real root", temporary)
+		}
+	}
+	// A disjoint sibling must still be accepted through the same alias.
+	sibling := filepath.Join(base, "sibling")
+	if err := os.MkdirAll(sibling, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectTemporaryOverlap(aliased, sibling); err != nil {
+		t.Fatalf("rejected disjoint temporary root: %v", err)
+	}
+}
+
 func TestAccountStoreRejectsAuthorityTMPDIR(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows temporary root uses native environment precedence")

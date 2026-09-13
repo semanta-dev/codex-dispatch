@@ -822,6 +822,49 @@ func TestCancelledBrokerWithEditsCannotWriteSuccessResult(t *testing.T) {
 	}
 }
 
+// A result directory reached through a symlinked ancestor must be usable: macOS
+// reaches every temporary directory through /var -> /private/var, and rejecting
+// the whole chain made every native run fail. A symlinked leaf must still be
+// refused so the export destination cannot be silently redirected.
+func TestResultDirResolvesAncestorSymlinkAndRejectsLeafSymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Ancestor symlink: accepted, and reported as the resolved location.
+	through := filepath.Join(link, "runs", "one")
+	got, err := ensureResultDir(Env{ResultDir: through}, base)
+	if err != nil {
+		t.Fatalf("rejected result directory through symlinked ancestor: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(real, "runs", "one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("result dir %s did not resolve to %s", got, want)
+	}
+
+	// Leaf symlink: refused rather than silently redirected.
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(base, "leaf")
+	if err := os.Symlink(target, leaf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureResultDir(Env{ResultDir: leaf}, base); err == nil {
+		t.Fatal("accepted a symlinked result directory leaf")
+	}
+}
+
 func TestEffectiveWorkdirDoesNotFollowPlantedSymlink(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "sentinel")

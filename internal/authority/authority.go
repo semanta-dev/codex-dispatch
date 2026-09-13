@@ -81,25 +81,59 @@ func Store(root string) (string, error) {
 // Codex may grant writes to its temporary root more specifically than a parent
 // deny rule. Refuse that overlap before publishing any private recovery data.
 // This is defense in depth; the app-server still needs an enforced read deny.
+//
+// Both sides must be resolved in the same namespace before comparison. On macOS
+// the temporary root is reached through /var -> /private/var, so resolving only
+// the temporary side compares unrelated namespaces and accepts a real overlap.
 func rejectTemporaryOverlap(root, temporary string) error {
-	temporary, err := filepath.EvalSymlinks(temporary)
+	temporary, err := resolvePath(temporary)
 	if err != nil {
 		return fmt.Errorf("cannot validate temporary directory: %w", err)
 	}
-	temporary, err = filepath.Abs(temporary)
+	root, err = resolvePath(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot validate private authority root: %w", err)
 	}
 	for _, paths := range [][2]string{{root, temporary}, {temporary, root}} {
 		rel, err := filepath.Rel(paths[0], paths[1])
 		if err != nil { // Different Windows volumes cannot overlap.
 			continue
 		}
-		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		if rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("temporary directory overlaps private authority; select a disjoint TMPDIR/TEMP")
 		}
 	}
 	return nil
+}
+
+// resolvePath returns an absolute path with every existing symlink resolved.
+// Trailing components that do not exist yet are preserved so a caller can
+// validate a directory before creating it.
+func resolvePath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	var pending []string
+	current := path
+	for {
+		resolved, evalErr := filepath.EvalSymlinks(current)
+		if evalErr == nil {
+			for i := len(pending) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, pending[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(evalErr) {
+			return "", evalErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("cannot resolve %s", path)
+		}
+		pending = append(pending, filepath.Base(current))
+		current = parent
+	}
 }
 
 func validHex(s string, size int) bool {
