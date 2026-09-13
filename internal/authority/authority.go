@@ -107,7 +107,7 @@ func validHex(s string, size int) bool {
 		return false
 	}
 	for _, c := range s {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
@@ -115,12 +115,12 @@ func validHex(s string, size int) bool {
 }
 
 func (b Binding) Validate() error {
-	if b.Version != 2 || !validHex(b.RunID, 32) || !(validHex(b.Head, 40) || validHex(b.Head, 64)) || len(b.Head) != len(b.BaselineTree) || !(validHex(b.BaselineTree, 40) || validHex(b.BaselineTree, 64)) || !validHex(b.IndexDigest, 64) || !validHex(b.IndexObjectsDigest, 64) || !validHex(b.CandidateHash, 64) || !filepath.IsAbs(b.Repository) || !filepath.IsAbs(b.Workdir) || !filepath.IsAbs(b.ExportDir) {
+	if b.Version != 2 || !validHex(b.RunID, 32) || !validHex(b.Head, 40) && !validHex(b.Head, 64) || len(b.Head) != len(b.BaselineTree) || !validHex(b.BaselineTree, 40) && !validHex(b.BaselineTree, 64) || !validHex(b.IndexDigest, 64) || !validHex(b.IndexObjectsDigest, 64) || !validHex(b.CandidateHash, 64) || !filepath.IsAbs(b.Repository) || !filepath.IsAbs(b.Workdir) || !filepath.IsAbs(b.ExportDir) {
 		return fmt.Errorf("invalid authority binding")
 	}
 	if b.SharedIndex != "" {
 		oid := strings.TrimPrefix(b.SharedIndex, "sharedindex.")
-		if oid == b.SharedIndex || !(validHex(oid, 40) || validHex(oid, 64)) || !validHex(b.SharedIndexDigest, 64) || !b.IndexPresent {
+		if oid == b.SharedIndex || !validHex(oid, 40) && !validHex(oid, 64) || !validHex(b.SharedIndexDigest, 64) || !b.IndexPresent {
 			return fmt.Errorf("invalid split index binding")
 		}
 	} else if b.SharedIndexDigest != "" {

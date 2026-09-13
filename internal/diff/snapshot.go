@@ -409,7 +409,7 @@ func saveSnapshot(repo, workdir, resultDir string) (*Baseline, error) {
 		if err != nil {
 			return nil, err
 		}
-		if rel == "." || !(rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		if rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("authority store must be outside repository and run paths")
 		}
 	}

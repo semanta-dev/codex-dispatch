@@ -243,7 +243,7 @@ func (b *boundedGitOutput) Write(p []byte) (int, error) {
 	if len(p) > b.limit-b.data.Len() {
 		b.overflow = true
 		b.cancel()
-		return 0, fmt.Errorf("Git output exceeds quota")
+		return 0, fmt.Errorf("git output exceeds quota")
 	}
 	return b.data.Write(p)
 }
@@ -258,10 +258,10 @@ func runGitBounded(ctx context.Context, workdir, indexFile, objectDir, input str
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	if stdout.overflow || stderr.overflow {
-		return "", fmt.Errorf("Git output exceeds quota")
+		return "", fmt.Errorf("git output exceeds quota")
 	}
 	if ctx.Err() != nil {
-		return "", fmt.Errorf("Git capture budget: %w", ctx.Err())
+		return "", fmt.Errorf("git capture budget: %w", ctx.Err())
 	}
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.data.String()))
@@ -576,30 +576,6 @@ func dedup(in []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func writeNULList(path string, items []string) error {
-	var buf bytes.Buffer
-	for _, s := range items {
-		buf.WriteString(s)
-		buf.WriteByte(0)
-	}
-	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), buf.Bytes(), 0o600)
-}
-
-func writeNULPairs(path string, keys []string, m map[string]string) error {
-	var buf bytes.Buffer
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		buf.WriteString(k)
-		buf.WriteByte(0)
-		buf.WriteString(v)
-		buf.WriteByte(0)
-	}
-	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), buf.Bytes(), 0o600)
 }
 
 func writeFilesChanged(path string, files []string) error {
