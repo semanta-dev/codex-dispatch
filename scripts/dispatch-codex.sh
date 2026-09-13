@@ -68,6 +68,10 @@ require_tools() {
     err "sha256sum or shasum required (provided by coreutils on Linux; preinstalled on macOS)"
     exit 6
   fi
+  command -v python3 >/dev/null 2>&1 || {
+    err "python3 required for safe archive extraction"
+    exit 6
+  }
 }
 
 sha256_of() {
@@ -117,14 +121,7 @@ with_lock() (
 # platform archive format (zip on Windows, tar.gz elsewhere).
 extract_archive() {
   local archive="$1" cache="$2" bin="$3"
-  if [ "$ARCHIVE_EXT" = "zip" ]; then
-    unzip -o -q "$archive" "$bin" -d "$cache" 2>/dev/null && return 0
-    unzip -o -q "$archive" -d "$cache" 2>/dev/null && return 0
-    return 1
-  fi
-  tar -xzf "$archive" -C "$cache" "$bin" 2>/dev/null && return 0
-  tar -xzf "$archive" -C "$cache" 2>/dev/null && return 0
-  return 1
+  python3 "$script_dir/safe_extract.py" "$archive" "$cache" "$bin"
 }
 
 download_and_verify() (

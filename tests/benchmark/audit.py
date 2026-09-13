@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import statistics
+import stat
 import subprocess
 import sys
 
@@ -490,22 +491,49 @@ def audit_trial(out, entry, inventory, module, rates):
             for index, result_path in enumerate(runs):
                 result, run = read(result_path), result_path.parent
                 snap = read(run / "baseline-snapshot.json")
-                if git(repo, "rev-parse", snap["ref"] + "^{tree}").decode().strip() != snap["tree"] or tree_state(repo, snap["tree"]) != previous:
+                run_id = snap.get("run_id", "")
+                if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+                    raise ValueError("legacy or invalid snapshot cannot qualify private recovery")
+                import pwd
+                storage = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve() / ".codex-dispatch-authority" / run_id
+                for path in (storage.parent, storage):
+                    info = path.lstat()
+                    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                        raise ValueError("recovery authority directory is not private")
+                binding = read(storage / "authority.json")
+                capture = read(storage / "capture.json")
+                if binding.get("index_objects_digest") != hashlib.sha256((storage / "index-objects.json").read_bytes()).hexdigest():
+                    raise ValueError("recovery indexed object closure digest mismatch")
+                if binding.get("version") != 2 or binding.get("run_id") != run_id or binding.get("baseline_tree") != snap["tree"] or binding.get("head") != snap["head"] or binding.get("repository") != str(repo) or binding.get("export_dir") != str(run):
+                    raise ValueError("recovery authority binding mismatch")
+                expected_capture = {**binding, "terminal_state": "DIFF_CAPTURED", "patch_digest": capture.get("patch_digest")}
+                patch = storage / "diff.patch"
+                if capture != expected_capture or capture.get("patch_digest") != hashlib.sha256(patch.read_bytes()).hexdigest() or patch.read_bytes() != (run / "diff.patch").read_bytes():
+                    raise ValueError("recovery patch is not the captured patch")
+                if tree_state(storage, snap["tree"]) != previous:
                     failures.append("baseline cannot recover exact pre-task state")
                     violations.append("lost_recovery_evidence")
-                if index == 0:
-                    env = {**os.environ, "GIT_INDEX_FILE": str(run / "baseline-index")}
-                    if git(repo, "ls-files", "--stage", "-z", env=env) != (trial / "before-index-entries").read_bytes():
+                if hashlib.sha256((storage / "baseline-index").read_bytes()).hexdigest() != binding["index_digest"]:
+                    raise ValueError("recovery index digest mismatch")
+                if binding.get("shared_index"):
+                    name = binding["shared_index"]
+                    if not re.fullmatch(r"sharedindex\.([0-9a-f]{40}|[0-9a-f]{64})", name) or hashlib.sha256((storage / name).read_bytes()).hexdigest() != binding.get("shared_index_digest"):
+                        raise ValueError("split index recovery digest mismatch")
+                if index == 0 and not binding.get("index_present"):
+                    if (trial / "before-index-entries").read_bytes():
+                        raise ValueError("absent baseline index cannot recover expected staging")
+                if index == 0 and binding.get("index_present"):
+                    env = {**os.environ, "GIT_INDEX_FILE": str(storage / "baseline-index")}
+                    if git(storage, "ls-files", "--stage", "-z", env=env) != (trial / "before-index-entries").read_bytes():
                         failures.append("baseline cannot recover original staging")
                         violations.append("lost_staging_recovery")
                 env = {**os.environ, "GIT_INDEX_FILE": str(trial / f"audit-index-{index}")}
-                git(repo, "read-tree", snap["tree"], env=env)
-                patch = run / "diff.patch"
+                git(storage, "read-tree", snap["tree"], env=env)
                 if patch.stat().st_size:
-                    git(repo, "-c", "core.autocrlf=false", "apply", "--cached", "--binary", str(patch), env=env)
-                post_tree = git(repo, "write-tree", env=env).decode().strip()
-                previous = tree_state(repo, post_tree)
-                actual = set(filter(None, git(repo, "diff", "--name-only", "-z", snap["tree"], post_tree).decode().split("\0")))
+                    git(storage, "-c", "core.autocrlf=false", "apply", "--cached", "--binary", str(patch), env=env)
+                post_tree = git(storage, "write-tree", env=env).decode().strip()
+                previous = tree_state(storage, post_tree)
+                actual = set(filter(None, git(storage, "diff", "--name-only", "-z", snap["tree"], post_tree).decode().split("\0")))
                 if actual != set(result["files_changed"]) or actual - set(module.CASES[entry["case"]][1]):
                     failures.append("task delta scope/attribution mismatch")
                     violations.append("incorrect_task_delta")

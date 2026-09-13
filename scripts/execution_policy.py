@@ -255,24 +255,34 @@ def snapshot(repo, destination, deadline):
         if relative.parts[0] in {'.codex-dispatch', '.git'}:
             continue
         target = destination / relative
-        with parent_handle(repo, relative) as handle:
-            try:
-                info = os.stat(relative.name, dir_fd=handle, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if stat.S_ISLNK(info.st_mode):
-                target.symlink_to(os.readlink(relative.name, dir_fd=handle))
-            elif stat.S_ISREG(info.st_mode):
-                with target.open('xb') as output:
-                    for data in regular_bytes(handle, relative.name, deadline):
-                        total += len(data)
-                        if total > MAX_TREE_BYTES:
-                            raise ValueError('verification input bytes exceed quota')
-                        output.write(data)
-                target.chmod(stat.S_IMODE(info.st_mode) & 0o777)
-            else:
-                raise ValueError('special repository file')
+        try:
+            with parent_handle(repo, relative) as handle:
+                try:
+                    info = os.stat(relative.name, dir_fd=handle, follow_symlinks=False)
+                except FileNotFoundError:
+                    # A tracked file whose parent was removed is a legitimate
+                    # deletion. The materialized checkout starts from the
+                    # baseline tree, so omitting this current-tree entry is
+                    # the correct representation; symlink/permission errors
+                    # still escape as failures.
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if stat.S_ISLNK(info.st_mode):
+                    target.symlink_to(os.readlink(relative.name, dir_fd=handle))
+                elif stat.S_ISREG(info.st_mode):
+                    with target.open('xb') as output:
+                        for data in regular_bytes(handle, relative.name, deadline):
+                            total += len(data)
+                            if total > MAX_TREE_BYTES:
+                                raise ValueError('verification input bytes exceed quota')
+                            output.write(data)
+                    target.chmod(stat.S_IMODE(info.st_mode) & 0o777)
+                else:
+                    raise ValueError('special repository file')
+        except FileNotFoundError:
+            # The parent itself disappeared, which is the directory-deletion
+            # form of the same tracked deletion case.
+            continue
 
 
 def tree_state(root, deadline):

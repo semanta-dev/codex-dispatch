@@ -1023,6 +1023,9 @@ func (a *AppServer) StartThread(ctx context.Context, opts ThreadStartOptions) (*
 		"approvalPolicy": "never",
 		"sandbox":        sandbox,
 	}
+	if opts.VerifySettings && sandbox == "workspace-write" {
+		params["config"] = confinedWorkspaceConfig()
+	}
 	if opts.CWD != "" {
 		params["cwd"] = opts.CWD
 	}
@@ -1062,6 +1065,9 @@ func (a *AppServer) ResumeThread(ctx context.Context, threadID string, opts Thre
 		return nil, err
 	}
 	params := map[string]any{"threadId": threadID, "sandbox": sandbox, "approvalPolicy": "never"}
+	if opts.VerifySettings && sandbox == "workspace-write" {
+		params["config"] = confinedWorkspaceConfig()
+	}
 	if opts.CWD != "" {
 		params["cwd"] = opts.CWD
 	}
@@ -1089,13 +1095,29 @@ func (a *AppServer) ResumeThread(ctx context.Context, threadID string, opts Thre
 	return &resp.Thread, nil
 }
 
+// Explicit leaf overrides replace inherited writable-root arrays and temp
+// grants on both fresh and resumed threads. A matching mode name alone does
+// not prove that the effective permissions stayed within the request.
+func confinedWorkspaceConfig() map[string]any {
+	return map[string]any{
+		"sandbox_workspace_write.writable_roots":         []string{},
+		"sandbox_workspace_write.network_access":         false,
+		"sandbox_workspace_write.exclude_tmpdir_env_var": true,
+		"sandbox_workspace_write.exclude_slash_tmp":      true,
+	}
+}
+
 func verifyThreadSettings(raw json.RawMessage, opts ThreadStartOptions) error {
 	var got struct {
 		CWD            string `json:"cwd"`
 		Model          string `json:"model"`
 		ApprovalPolicy string `json:"approvalPolicy"`
 		Sandbox        struct {
-			Type string `json:"type"`
+			Type                string   `json:"type"`
+			NetworkAccess       bool     `json:"networkAccess"`
+			WritableRoots       []string `json:"writableRoots"`
+			ExcludeTmpdirEnvVar bool     `json:"excludeTmpdirEnvVar"`
+			ExcludeSlashTmp     bool     `json:"excludeSlashTmp"`
 		} `json:"sandbox"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
@@ -1117,6 +1139,21 @@ func verifyThreadSettings(raw json.RawMessage, opts ThreadStartOptions) error {
 	want := map[string]string{"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}[mode]
 	if got.Sandbox.Type != want {
 		return fmt.Errorf("effective thread sandbox does not match requested mode")
+	}
+	if mode != "danger-full-access" && got.Sandbox.NetworkAccess {
+		return fmt.Errorf("effective thread sandbox unexpectedly permits network access")
+	}
+	if mode == "workspace-write" {
+		if !got.Sandbox.ExcludeTmpdirEnvVar || !got.Sandbox.ExcludeSlashTmp {
+			return fmt.Errorf("effective thread sandbox retains unbound temporary write access")
+		}
+		for _, root := range got.Sandbox.WritableRoots {
+			if !filepath.IsAbs(root) || filepath.Clean(root) != filepath.Clean(got.CWD) {
+				return fmt.Errorf("effective thread sandbox contains an unrequested writable root")
+			}
+		}
+	} else if mode == "read-only" && len(got.Sandbox.WritableRoots) != 0 {
+		return fmt.Errorf("effective read-only thread contains writable roots")
 	}
 	return nil
 }

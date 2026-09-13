@@ -11,15 +11,18 @@ package diff
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/semanta-dev/codex-dispatch/internal/artifact"
 )
 
 // Stats is the JSON shape written to result_dir/stats.json.
@@ -29,46 +32,25 @@ type Stats struct {
 	LinesRemoved int      `json:"lines_removed"`
 }
 
-// CaptureBaseline saves a recoverable pre-run working-tree snapshot in a local
-// Git ref and writes its manifest plus legacy attribution files to resultDir.
+// CaptureBaseline saves a recoverable pre-run working-tree snapshot privately
+// and writes its exported descriptor to resultDir.
 // Any failure prevents dispatch because attribution would be unreliable.
 func CaptureBaseline(workdir, resultDir string) error {
+	_, err := CaptureBaselineHandle(workdir, resultDir)
+	return err
+}
+
+// CaptureBaselineHandle returns controller-held identity for the lifetime of a
+// dispatch. The model-written export is never used to choose capture targets.
+func CaptureBaselineHandle(workdir, resultDir string) (*Baseline, error) {
 	if resultDir == "" {
-		return fmt.Errorf("resultDir required")
+		return nil, fmt.Errorf("resultDir required")
 	}
 	repoRoot, err := gitTopLevel(workdir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	resultRel, err := relIfUnder(repoRoot, resultDir)
-	if err != nil {
-		return err
-	}
-
-	tracked, err := listChangedNames(repoRoot, "", "HEAD", resultRel)
-	if err != nil {
-		return err
-	}
-	untracked, err := listUntracked(repoRoot, "", resultRel)
-	if err != nil {
-		return err
-	}
-	pre := dedup(append(tracked, untracked...))
-
-	hashes := make(map[string]string, len(pre))
-	for _, f := range pre {
-		if h := hashFile(repoRoot, f); h != "" {
-			hashes[f] = h
-		}
-	}
-
-	if err := writeNULList(filepath.Join(resultDir, "baseline-pre-files.txt"), pre); err != nil {
-		return err
-	}
-	if err := writeNULPairs(filepath.Join(resultDir, "baseline-pre-hashes.txt"), pre, hashes); err != nil {
-		return err
-	}
-	return saveSnapshot(repoRoot, resultDir)
+	return saveSnapshot(repoRoot, workdir, resultDir)
 }
 
 // Capture runs against the current working directory. CaptureInDir is the
@@ -104,7 +86,7 @@ func captureInDir(workdir, baselineHead, resultDir string, requireSnapshot bool)
 	if err != nil {
 		return Stats{}, err
 	}
-	if raw, err := os.ReadFile(filepath.Join(resultDir, "baseline-snapshot.json")); err == nil {
+	if raw, err := readSnapshotExport(resultDir); err == nil {
 		var s snapshot
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return Stats{}, fmt.Errorf("invalid baseline snapshot: %w", err)
@@ -216,15 +198,81 @@ func runGit(workdir string, args ...string) (string, error) {
 // runGitIndex runs git in workdir; when indexFile is non-empty the command is
 // pointed at it via GIT_INDEX_FILE so it never reads or writes the shared index.
 func runGitIndex(workdir, indexFile string, args ...string) (string, error) {
-	full := append([]string{"-c", "core.quotepath=false"}, args...)
-	cmd := exec.Command("git", full...)
-	cmd.Dir = workdir
-	if indexFile != "" {
-		cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+indexFile)
+	return runGitIndexObjects(workdir, indexFile, "", args...)
+}
+
+// gitCommand strips caller Git overrides; snapshot object writes have no
+// alternates so each captured tree is self-contained in the private store.
+func gitCommand(workdir, indexFile, objectDir string, args ...string) *exec.Cmd {
+	return gitCommandContext(context.Background(), workdir, indexFile, objectDir, args...)
+}
+
+func gitCommandContext(ctx context.Context, workdir, indexFile, objectDir string, args ...string) *exec.Cmd {
+	if objectDir != "" {
+		args = append([]string{"-c", "core.splitIndex=false"}, args...)
 	}
+	full := append([]string{"--no-replace-objects", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-c", "protocol.allow=never"}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.WaitDelay = time.Second
+	cmd.Dir = workdir
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GIT_") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+	if indexFile != "" {
+		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+indexFile)
+	}
+	if objectDir != "" {
+		cmd.Env = append(cmd.Env, "GIT_OBJECT_DIRECTORY="+objectDir, "GIT_ALTERNATE_OBJECT_DIRECTORIES=")
+	}
+	return cmd
+}
+
+// boundedGitOutput cancels the child as soon as either output stream overflows.
+// Returning a writer error alone could leave Git blocked on a full output pipe.
+type boundedGitOutput struct {
+	data     bytes.Buffer
+	limit    int
+	cancel   context.CancelFunc
+	overflow bool
+}
+
+func (b *boundedGitOutput) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.data.Len() {
+		b.overflow = true
+		b.cancel()
+		return 0, fmt.Errorf("Git output exceeds quota")
+	}
+	return b.data.Write(p)
+}
+
+func runGitBounded(ctx context.Context, workdir, indexFile, objectDir, input string, limit int, args ...string) (string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := gitCommandContext(ctx, workdir, indexFile, objectDir, args...)
+	cmd.Stdin = strings.NewReader(input)
+	stdout := boundedGitOutput{limit: limit, cancel: cancel}
+	stderr := boundedGitOutput{limit: 64000, cancel: cancel}
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if stdout.overflow || stderr.overflow {
+		return "", fmt.Errorf("Git output exceeds quota")
+	}
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("Git capture budget: %w", ctx.Err())
+	}
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.data.String()))
+	}
+	return stdout.data.String(), nil
+}
+
+func runGitIndexObjects(workdir, indexFile, objectDir string, args ...string) (string, error) {
+	cmd := gitCommand(workdir, indexFile, objectDir, args...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
@@ -238,6 +286,11 @@ func runGitIndex(workdir, indexFile string, args ...string) (string, error) {
 func setupTempIndex(repoRoot, resultDir string) (string, func(), error) {
 	tmp := filepath.Join(resultDir, "index.tmp")
 	cleanup := func() { _ = os.Remove(tmp) }
+	// This run owns the temporary name; remove only a prior interrupted copy,
+	// then publish the replacement with O_EXCL so symlink substitutions fail.
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		return "", cleanup, err
+	}
 
 	gitDir, err := runGit(repoRoot, "rev-parse", "--absolute-git-dir")
 	if err != nil {
@@ -258,20 +311,25 @@ func setupTempIndex(repoRoot, resultDir string) (string, func(), error) {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	root, err := os.OpenRoot(filepath.Dir(src))
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	defer root.Close()
+	data, err := artifact.ReadRegularAt(root, filepath.Base(src), 512*1024*1024)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
 		return err
 	}
-	return out.Close()
+	_, err = out.Write(data)
+	closeErr := out.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 func gitAddIntentToAdd(workdir, indexFile string, paths []string) error {
@@ -283,7 +341,7 @@ func gitAddIntentToAdd(workdir, indexFile string, paths []string) error {
 // hashFile returns the git blob hash of the working-tree content at path, or ""
 // if the file is missing or git fails. hash-object does not consult the index.
 func hashFile(repoRoot, path string) string {
-	out, err := runGit(repoRoot, "hash-object", "--", path)
+	out, err := runGit(repoRoot, "hash-object", "--no-filters", "--", path)
 	if err != nil {
 		return ""
 	}
@@ -405,25 +463,44 @@ func listChangedNames(repoRoot, indexFile, baseline, resultRel string) ([]string
 }
 
 func writeDiffPatch(repoRoot, indexFile, baseline string, files []string, path string, after ...string) error {
-	if len(files) == 0 {
-		return os.WriteFile(path, nil, 0o644)
-	}
-	args := append([]string{"--literal-pathspecs", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", baseline}, after...)
-	args = append(append(args, "--"), files...)
-	out, err := runGitIndex(repoRoot, indexFile, args...)
+	return writeDiffPatchObjects(repoRoot, indexFile, "", baseline, files, path, after...)
+}
+
+func writeDiffPatchObjects(repoRoot, indexFile, objectDir, baseline string, files []string, path string, after ...string) error {
+	patch, err := diffPatchBytes(repoRoot, indexFile, objectDir, baseline, files, after...)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(out), 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), patch, 0600)
+}
+
+func diffPatchBytes(repoRoot, indexFile, objectDir, baseline string, files []string, after ...string) ([]byte, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"--literal-pathspecs", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", baseline}, after...)
+	args = append(append(args, "--"), files...)
+	out, err := runGitIndexObjects(repoRoot, indexFile, objectDir, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > 8*1024*1024 {
+		return nil, fmt.Errorf("task patch exceeds byte quota")
+	}
+	return []byte(out), nil
 }
 
 func numstat(repoRoot, indexFile, baseline string, files []string, after ...string) (int, int, error) {
+	return numstatObjects(repoRoot, indexFile, "", baseline, files, after...)
+}
+
+func numstatObjects(repoRoot, indexFile, objectDir, baseline string, files []string, after ...string) (int, int, error) {
 	if len(files) == 0 {
 		return 0, 0, nil
 	}
 	args := append([]string{"--literal-pathspecs", "diff", baseline}, after...)
 	args = append(append(args, "--no-renames", "--numstat", "-z", "--"), files...)
-	out, err := runGitIndex(repoRoot, indexFile, args...)
+	out, err := runGitIndexObjects(repoRoot, indexFile, objectDir, args...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -507,7 +584,7 @@ func writeNULList(path string, items []string) error {
 		buf.WriteString(s)
 		buf.WriteByte(0)
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), buf.Bytes(), 0o600)
 }
 
 func writeNULPairs(path string, keys []string, m map[string]string) error {
@@ -522,19 +599,19 @@ func writeNULPairs(path string, keys []string, m map[string]string) error {
 		buf.WriteString(v)
 		buf.WriteByte(0)
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), buf.Bytes(), 0o600)
 }
 
 func writeFilesChanged(path string, files []string) error {
 	if len(files) == 0 {
-		return os.WriteFile(path, nil, 0o644)
+		return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), nil, 0o600)
 	}
 	var buf bytes.Buffer
 	for _, f := range files {
 		buf.WriteString(f)
 		buf.WriteByte('\n')
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), buf.Bytes(), 0o600)
 }
 
 func writeStatsJSON(path string, stats Stats) error {
@@ -545,5 +622,5 @@ func writeStatsJSON(path string, stats Stats) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), b, 0o600)
 }

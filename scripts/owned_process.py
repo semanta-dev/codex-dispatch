@@ -101,7 +101,13 @@ def main():
     code = 125
     try:
         child = subprocess.Popen(command)
-        code = child.wait()
+        # Popen.wait catches KeyboardInterrupt and grants the child another
+        # 250ms before re-raising. Our SIGTERM handler uses KeyboardInterrupt to
+        # enter owned cleanup, so that grace let a noisy writer keep filling
+        # disk after the output limit fired. Polling lets the signal reach the
+        # existing finally/acknowledgement/drain path immediately.
+        while (code := child.poll()) is None:
+            time.sleep(.01)
         if handoff is not None and code == 0:
             with handoff.open('rb') as log:
                 log.seek(max(0, handoff.stat().st_size - 256))

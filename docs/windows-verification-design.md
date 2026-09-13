@@ -170,3 +170,21 @@ and three system DLLs. It records numeric Winsock error codes and makes no ACL,
 capability, or registry modification. `registryRead` is a known broad LPAC
 capability, not an approved remediation: a necessary, sufficiently narrow
 resource policy has not yet been established.
+
+## Fourth native observation
+
+Candidate `b897a43`, run [34441345671](https://github.com/semanta-dev/codex-dispatch/actions/runs/34441345671),
+again remained NO-GO on both architectures. Winsock returned error 10107
+(`WSASYSCALLFAILURE`). All four fixed registry `KEY_READ` opens returned access
+denied while the three System32 DLL loads succeeded. `KEY_READ` combines several
+rights, so this does not prove minimum value-query access is denied or that
+registry access alone would repair startup. The next read-only probe separates
+`KEY_QUERY_VALUE`, `KEY_ENUMERATE_SUB_KEYS`, and `KEY_READ` without reading values.
+
+The amd64 lifecycle failure is now localized to `CreateProcess` for the inherited
+LPAC grandchild, returning access denied before a descendant exists. ARM64 again
+passed supervisor-death cleanup for two observed descendants. A read/execute open
+of the exact copied helper will distinguish executable access from other child
+creation restrictions in the next run. Actual Go standard-library operations and
+MSYS still fail, and cleanup reports no errors. No policy exception is justified
+by these diagnostics alone.

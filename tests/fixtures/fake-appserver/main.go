@@ -254,9 +254,10 @@ func (s *fakeState) getThreadID() string {
 // Effective settings match the real thread response schema.
 func effectiveThreadResponse(tid string, params json.RawMessage) map[string]any {
 	var p struct {
-		CWD     string `json:"cwd"`
-		Model   string `json:"model"`
-		Sandbox string `json:"sandbox"`
+		CWD     string                     `json:"cwd"`
+		Model   string                     `json:"model"`
+		Sandbox string                     `json:"sandbox"`
+		Config  map[string]json.RawMessage `json:"config"`
 	}
 	_ = json.Unmarshal(params, &p)
 	if p.CWD == "" {
@@ -269,7 +270,16 @@ func effectiveThreadResponse(tid string, params json.RawMessage) map[string]any 
 	if mode == "" {
 		mode = "workspaceWrite"
 	}
-	return map[string]any{"thread": map[string]any{"id": tid, "cwd": p.CWD, "status": "running"}, "cwd": p.CWD, "model": p.Model, "sandbox": map[string]string{"type": mode}, "approvalPolicy": "never"}
+	policy := map[string]any{"type": mode}
+	if mode == "workspaceWrite" {
+		policy["writableRoots"] = []string{p.CWD}
+		for field, key := range map[string]string{"networkAccess": "network_access", "excludeTmpdirEnvVar": "exclude_tmpdir_env_var", "excludeSlashTmp": "exclude_slash_tmp"} {
+			value := false
+			_ = json.Unmarshal(p.Config["sandbox_workspace_write."+key], &value)
+			policy[field] = value
+		}
+	}
+	return map[string]any{"thread": map[string]any{"id": tid, "cwd": p.CWD, "status": "running"}, "cwd": p.CWD, "model": p.Model, "sandbox": policy, "approvalPolicy": "never"}
 }
 
 func (s *fakeState) handleThreadStart(id *json.Number, params json.RawMessage) bool {

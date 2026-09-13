@@ -19,6 +19,7 @@ setup() {
   TMP_REPO="$(mktemp -d)"
   mkdir -p "$TMP_REPO/scripts"
   cp "$DISPATCH" "$TMP_REPO/scripts/dispatch-codex.sh"
+  cp "$REPO_ROOT/scripts/safe_extract.py" "$TMP_REPO/scripts/safe_extract.py"
   printf '%s\n' "$VERSION" > "$TMP_REPO/VERSION"
   DISPATCH="$TMP_REPO/scripts/dispatch-codex.sh"
 
@@ -174,9 +175,13 @@ without_flock() {
   NO_FLOCK_PATH="$TMP_REPO/no-flock"
   mkdir -p "$NO_FLOCK_PATH"
   local tool
-  for tool in bash sh awk grep mktemp cat chmod dirname uname mkdir rmdir sleep rm cp mv tar gzip unzip curl sha256sum shasum; do
+  for tool in python3 bash sh awk grep mktemp cat chmod dirname uname mkdir rmdir sleep rm cp mv tar gzip unzip curl sha256sum shasum; do
     if command -v "$tool" >/dev/null 2>&1; then
-      ln -s "$(command -v "$tool")" "$NO_FLOCK_PATH/$tool"
+      if [ "$tool" = python3 ]; then
+        ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$NO_FLOCK_PATH/$tool"
+      else
+        ln -s "$(command -v "$tool")" "$NO_FLOCK_PATH/$tool"
+      fi
     fi
   done
 }

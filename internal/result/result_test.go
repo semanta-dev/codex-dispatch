@@ -120,11 +120,7 @@ func TestErrorMessagePresentWhenSet(t *testing.T) {
 	}
 }
 
-// TestWriteCreatesFile verifies Write creates result.json with mode 0o644.
-// Note: Write uses os.WriteFile (truncate-in-place); it is NOT atomic. The
-// dispatch flow is single-writer with the reader running only after Write
-// returns, so this is acceptable. If that contract changes, this test (and
-// Write) should be revisited.
+// TestWriteCreatesFile verifies Write creates a private result artifact.
 func TestWriteCreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	r := Result{ExitCode: 0, FilesChanged: []string{"a"}}
@@ -135,7 +131,25 @@ func TestWriteCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("result.json not written: %v", err)
 	}
-	if got := fi.Mode().Perm(); runtime.GOOS != "windows" && got != 0o644 {
-		t.Fatalf("result.json permissions = %o, want 0644", got)
+	if got := fi.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
+		t.Fatalf("result.json permissions = %o, want 0600", got)
+	}
+}
+
+func TestWriteDoesNotFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "result.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := Write(dir, Result{ExitCode: 0}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "untouched" {
+		t.Fatalf("symlink target changed: %q (%v)", got, err)
 	}
 }

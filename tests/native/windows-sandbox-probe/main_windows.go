@@ -278,11 +278,16 @@ func prerequisiteAccess() map[string]string {
 	closeKey := windows.NewLazySystemDLL("advapi32.dll").NewProc("RegCloseKey")
 	for _, path := range []string{`SYSTEM\CurrentControlSet\Services\WinSock2\Parameters`, `SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9`, `SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\NameSpace_Catalog5`, `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters`} {
 		name, _ := windows.UTF16PtrFromString(path)
-		var key windows.Handle
-		status, _, _ := openKey.Call(uintptr(syscall.HKEY_LOCAL_MACHINE), uintptr(unsafe.Pointer(name)), 0, 0x20019, uintptr(unsafe.Pointer(&key)))
-		result["HKLM\\"+path] = fmt.Sprintf("RegOpenKeyEx KEY_READ status=%d", status)
-		if status == 0 {
-			closeKey.Call(uintptr(key))
+		for _, access := range []struct {
+			name string
+			mask uintptr
+		}{{"KEY_QUERY_VALUE", 1}, {"KEY_ENUMERATE_SUB_KEYS", 8}, {"KEY_READ", 0x20019}} {
+			var key windows.Handle
+			status, _, _ := openKey.Call(uintptr(syscall.HKEY_LOCAL_MACHINE), uintptr(unsafe.Pointer(name)), 0, access.mask, uintptr(unsafe.Pointer(&key)))
+			result["HKLM\\"+path+"/"+access.name] = fmt.Sprintf("RegOpenKeyEx status=%d", status)
+			if status == 0 {
+				closeKey.Call(uintptr(key))
+			}
 		}
 	}
 	for _, name := range []string{"ws2_32.dll", "mswsock.dll", "nsi.dll"} {
@@ -552,7 +557,13 @@ func lifecycleChild(mode string) int {
 		si := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
 		pi := windows.ProcessInformation{}
 		if err := windows.CreateProcess(app, line, nil, nil, false, windows.CREATE_NO_WINDOW, nil, nil, &si, &pi); err != nil {
-			return fail("CreateProcess inherited LPAC child", err)
+			// Separate executable access from child-process policy failure. This is
+			// a read/execute handle probe only; it grants no additional rights.
+			handle, accessErr := windows.CreateFile(app, windows.GENERIC_READ|windows.GENERIC_EXECUTE, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+			if accessErr == nil {
+				windows.CloseHandle(handle)
+			}
+			return fail("CreateProcess inherited LPAC child", fmt.Errorf("CreateProcess error=%d: %v; executable read/execute access: %v", err, err, accessErr))
 		}
 		defer windows.CloseHandle(pi.Process)
 		defer windows.CloseHandle(pi.Thread)

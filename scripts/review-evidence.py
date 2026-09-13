@@ -18,6 +18,27 @@ POLICY = importlib.util.module_from_spec(_POLICY_SPEC)
 _POLICY_SPEC.loader.exec_module(POLICY)
 
 
+def write_atomic(path: Path, content: str) -> None:
+    """Publish controller evidence without following an existing leaf link."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def detect_test(repo):
     pyproject = repo / "pyproject.toml"
     if (repo / "pytest.ini").exists() or (pyproject.exists() and "[tool.pytest" in pyproject.read_text()):
@@ -145,7 +166,7 @@ def collect():
     bundle = {"complete": True, "run_dir": str(run), "result": result, "test": None, "verification": None}
     if result["exit_code"] != 0:
         bundle["codex_stdout_tail"] = (run / "stdout.log").read_text(errors="replace")[-8000:]
-        (run / "review-evidence.json").write_text(json.dumps(bundle, indent=2) + "\n")
+        write_atomic(run / "review-evidence.json", json.dumps(bundle, indent=2) + "\n")
         return bundle
     diff = (run / "diff.patch").read_text(errors="strict")
     if len(diff) > LIMIT:
@@ -189,7 +210,7 @@ def collect():
     if live_fingerprint(repo, run) != captured_fingerprint:
         bundle["verification_mutations"] = sorted(set(bundle["verification_mutations"]) | {"live-tree-drift"})
     bundle["complete"] = True
-    (run / "review-evidence.json").write_text(json.dumps(bundle, indent=2) + "\n")
+    write_atomic(run / "review-evidence.json", json.dumps(bundle, indent=2) + "\n")
     return bundle
 
 

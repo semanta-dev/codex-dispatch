@@ -600,15 +600,18 @@ func TestRunTimeoutFromEnvReturnsPromptlyWithStatus(t *testing.T) {
 // TestRunBaselineCaptureFailureIsSurfaced checks that a failure to write the
 // diff baseline aborts the run with a surfaced error instead of proceeding to
 // codex (which would silently mis-attribute files_changed). The failure is
-// forced by pre-creating baseline-pre-files.txt as a directory so the baseline
+// forced by pre-creating baseline-snapshot.json as a directory so the baseline
 // write cannot succeed.
 func TestRunBaselineCaptureFailureIsSurfaced(t *testing.T) {
 	requireCodex(t)
 	repo := setupGitRepo(t)
 	chdirTo(t, repo)
 	resultDir := filepath.Join(repo, "run-baseline-fail")
-	if err := os.MkdirAll(filepath.Join(resultDir, "baseline-pre-files.txt"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(resultDir, "baseline-snapshot.json"), 0o755); err != nil {
 		t.Fatalf("seed obstructing dir: %v", err)
+	}
+	if err := os.Chmod(resultDir, 0o700); err != nil {
+		t.Fatalf("make result dir private: %v", err)
 	}
 	env := Env{
 		WorkDir:    repo,

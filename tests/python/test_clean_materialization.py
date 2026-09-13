@@ -1,9 +1,12 @@
 """Real hostile Git hooks/config must never execute during clean materialization."""
 import importlib.util
+import json
+import hashlib
 import os
 from pathlib import Path
 import shlex
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -16,6 +19,7 @@ CLEAN = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CLEAN)
 
 
+@unittest.skipUnless(sys.platform == "linux", "requires Linux clean verification")
 class CleanMaterializationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -35,6 +39,29 @@ class CleanMaterializationTests(unittest.TestCase):
         self.run_dir = self.repo / "run"
         self.run_dir.mkdir()
         (self.run_dir / "baseline-head.txt").write_text(self.baseline + "\n")
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        ref = "refs/codex-dispatch/baselines/test"
+        self.git("update-ref", ref, tree)
+        import pwd
+        run_id = "a" * 32
+        authority = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".codex-dispatch-authority" / hashlib.sha256(self.root.name.encode()).hexdigest()[:32]
+        authority.parent.mkdir(mode=0o700, exist_ok=True)
+        authority.mkdir(mode=0o700)
+        subprocess.run(["git", "init", "--bare", "--quiet", str(authority)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "push", "--quiet", str(authority), "HEAD:refs/authority/baseline"], check=True)
+        index_bytes = (self.repo / ".git/index").read_bytes()
+        (authority / "baseline-index").write_bytes(index_bytes)
+        index_manifest = json.dumps({"version": 1, "objects": []}, separators=(",", ":")).encode()
+        (authority / "index-objects.json").write_bytes(index_manifest)
+        candidate = "c" * 64
+        baseline_record = {"version": 2, "run_id": authority.name, "head": self.baseline, "baseline_tree": tree, "index_digest": hashlib.sha256(index_bytes).hexdigest(), "index_objects_digest": hashlib.sha256(index_manifest).hexdigest(), "index_present": True, "candidate_hash": candidate, "repository": str(self.repo.resolve()), "workdir": str(self.repo.resolve()), "export_dir": str(self.run_dir.resolve()), "terminal_state": "BASELINE_CAPTURED"}
+        capture_record = {**baseline_record, "patch_digest": hashlib.sha256(b"").hexdigest(), "terminal_state": "DIFF_CAPTURED"}
+        (authority / "authority.json").write_text(json.dumps(baseline_record))
+        (authority / "capture.json").write_text(json.dumps(capture_record))
+        (authority / "diff.patch").write_bytes(b"")
+        self.authority = authority
+        self.addCleanup(shutil.rmtree, authority, ignore_errors=True)
+        (self.run_dir / "baseline-snapshot.json").write_text(json.dumps({"version": 2, "head": self.baseline, "tree": tree, "run_id": authority.name, "authority_dir": str(authority), "object_dir": str(authority / "objects")}))
         (self.run_dir / "diff.patch").write_text("")
         self.sentinel = self.root / "outside-secret"
 
@@ -89,6 +116,10 @@ class CleanMaterializationTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "linux" and Path("/usr/bin/bwrap").exists(), "requires native Linux confinement")
     def test_public_clean_route_confines_and_preserves_module_cwd(self):
         self.hostile_config()
+        for name in ("authority.json", "capture.json"):
+            record = json.loads((self.authority / name).read_text())
+            record["workdir"] = str(self.repo / "module")
+            (self.authority / name).write_text(json.dumps(record))
         result = subprocess.run(["bash", str(ROOT / "scripts/clean-verify.sh"), str(self.run_dir), "bash", "-c",
                                  'test "$(cat value.txt)" = baseline && test -z "${ANTHROPIC_API_KEY:-}"'],
                                 cwd=self.repo / "module", env={**os.environ, "ANTHROPIC_API_KEY": "FAKE_REVIEW_CREDENTIAL_ONLY"},
@@ -99,15 +130,50 @@ class CleanMaterializationTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "linux" and Path("/usr/bin/bwrap").exists(), "requires native Linux confinement")
     def test_public_clean_route_reports_verifier_source_mutation(self):
         result = subprocess.run(["bash", str(ROOT / "scripts/clean-verify.sh"), str(self.run_dir), "bash", "-c",
-                                 'echo changed > module/value.txt'], cwd=self.repo, capture_output=True, text=True, timeout=30)
+                                 'echo changed > module/value.txt'], cwd=self.repo, env=os.environ, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 66, result.stderr)
         self.assertEqual((self.repo / "module/value.txt").read_text(), "baseline\n")
 
     def test_patch_cannot_write_repository_configuration(self):
         (self.run_dir / "diff.patch").write_text("diff --git a/.git/config b/.git/config\nnew file mode 100644\n--- /dev/null\n+++ b/.git/config\n@@ -0,0 +1 @@\n+hostile\n")
         result = subprocess.run(["bash", str(ROOT / "scripts/clean-verify.sh"), str(self.run_dir), "true"],
-                                cwd=self.repo, capture_output=True, text=True, timeout=30)
-        self.assertEqual(result.returncode, 65, result.stderr)
+                                cwd=self.repo, env=os.environ, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 6, result.stderr)
+        self.assertIn("patch digest mismatch", result.stderr)
+
+    def rejected(self, message):
+        result = subprocess.run(["bash", str(ROOT / "scripts/clean-verify.sh"), str(self.run_dir), "true"],
+                                cwd=self.repo, env=os.environ, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 6, result.stderr)
+        self.assertIn(message, result.stderr)
+
+    def test_other_export_cannot_replay_authority(self):
+        record = json.loads((self.authority / "authority.json").read_text())
+        record["export_dir"] = str(self.repo / "other-run")
+        (self.authority / "authority.json").write_text(json.dumps(record))
+        self.rejected("binding mismatch")
+
+    def test_changed_index_is_rejected(self):
+        (self.authority / "baseline-index").write_bytes(b"changed index")
+        self.rejected("index digest mismatch")
+
+    def test_malformed_authority_is_structured_failure(self):
+        (self.authority / "authority.json").write_text("[]")
+        self.rejected("format is invalid")
+
+    def test_symlink_authority_root_is_rejected(self):
+        moved = self.authority.with_name(self.authority.name + "-moved")
+        self.authority.rename(moved)
+        self.authority.symlink_to(moved, target_is_directory=True)
+        self.addCleanup(shutil.rmtree, moved, ignore_errors=True)
+        self.addCleanup(self.authority.unlink)
+        self.rejected("private authority is required")
+
+    def test_changed_candidate_and_state_are_rejected(self):
+        record = json.loads((self.authority / "capture.json").read_text())
+        record["candidate_hash"] = "d" * 64
+        (self.authority / "capture.json").write_text(json.dumps(record))
+        self.rejected("immutable baseline")
 
 
 if __name__ == "__main__":

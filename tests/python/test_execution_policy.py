@@ -5,6 +5,7 @@ import subprocess
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -106,6 +107,36 @@ PROBE'''
                 self.assertLess(elapsed, 3, diagnostic)
                 self.assertLessEqual(len(result['stdout']), policy.TAIL, diagnostic)
                 self.assertLessEqual((self.root / 'stdout').stat().st_size, policy.MAX_OUTPUT, diagnostic)
+
+    def test_cancel_does_not_grant_writer_an_interrupt_grace_period(self):
+        if sys.platform != 'linux':
+            self.skipTest('dedicated Linux owner regression')
+        ready, trigger, late = (self.root / name for name in ['ready', 'trigger', 'late-write'])
+        cancel, observed = threading.Event(), threading.Event()
+        def request_cancel():
+            deadline = time.monotonic() + 3
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(.002)
+            if not ready.exists():
+                return
+            observed.set()
+            cancel.set()
+            # Model the next write becoming ready after cancellation. The old
+            # Popen.wait interrupt grace kept the child alive for 250ms.
+            time.sleep(.15)
+            trigger.write_text('write now')
+        controller = threading.Thread(target=request_cancel)
+        controller.start()
+        code = "from pathlib import Path; import sys,time; ready,trigger,late=map(Path,sys.argv[1:]); ready.write_text('ready')\nwhile not trigger.exists(): time.sleep(.002)\nlate.write_text('wrote after cancel')"
+        try:
+            result = policy.supervised([sys.executable, '-I', '-c', code, str(ready), str(trigger), str(late)],
+                                       self.repo, policy.minimal_environment(), self.root/'stdout', self.root/'stderr', 5, cancel=cancel)
+        finally:
+            controller.join(timeout=4)
+        self.assertFalse(controller.is_alive())
+        self.assertTrue(observed.is_set(), 'command never reached readiness')
+        self.assertEqual(result['failure_kind'], 'cancelled', result)
+        self.assertFalse(late.exists(), result)
 
     def test_special_and_oversized_output_fail_without_unbounded_read(self):
         self.require_linux()

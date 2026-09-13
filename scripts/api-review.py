@@ -30,7 +30,22 @@ No prose. Do not narrate passing checks. Retry limits do not change this decisio
 
 
 def write(path, value):
-    path.write_text(json.dumps(value, indent=2) + '\n')
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            descriptor = -1
+            stream.write(json.dumps(value, indent=2) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def transport():

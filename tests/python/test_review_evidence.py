@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -65,7 +66,9 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(bundle["verification"]["exit_code"], 7)
         self.assertIn("diagnostic", bundle["verification"]["stderr"])
 
+    @unittest.skipUnless(os.name == "posix", "requires Linux clean verification")
     def test_clean_verification_preserves_arguments_and_shell_semantics(self):
+        import pwd
         source = Path(__file__).resolve().parents[2] / "scripts/clean-verify.sh"
         shutil.copy2(source, self.scripts / "clean-verify.sh")
         shutil.copy2(source.with_name("execution_policy.py"), self.scripts / "execution_policy.py")
@@ -75,7 +78,27 @@ class ReviewEvidenceTests(unittest.TestCase):
         subprocess.run(["git", "add", "README.md"], check=True)
         subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "base"], check=True)
         (self.run / "baseline-head.txt").write_bytes(subprocess.check_output(["git", "rev-parse", "HEAD"]))
-        (self.run / "diff.patch").write_text("diff --git a/hello.txt b/hello.txt\nnew file mode 100644\n--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1 @@\n+hello\n")
+        baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+        run_id = "b" * 32
+        authority = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".codex-dispatch-authority" / hashlib.sha256(self.temp.name.encode()).hexdigest()[:32]
+        self.addCleanup(shutil.rmtree, authority, ignore_errors=True)
+        authority.parent.mkdir(mode=0o700, exist_ok=True)
+        authority.mkdir(mode=0o700)
+        subprocess.run(["git", "init", "--bare", "--quiet", str(authority)], check=True)
+        subprocess.run(["git", "push", "--quiet", str(authority), "HEAD:refs/authority/baseline"], check=True)
+        patch_text = "diff --git a/hello.txt b/hello.txt\nnew file mode 100644\n--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1 @@\n+hello\n"
+        index_bytes = (self.repo / ".git/index").read_bytes()
+        (authority / "baseline-index").write_bytes(index_bytes)
+        index_manifest = json.dumps({"version": 1, "objects": []}, separators=(",", ":")).encode()
+        (authority / "index-objects.json").write_bytes(index_manifest)
+        common = {"version": 2, "run_id": authority.name, "head": baseline, "baseline_tree": tree, "index_digest": hashlib.sha256(index_bytes).hexdigest(), "index_objects_digest": hashlib.sha256(index_manifest).hexdigest(), "index_present": True, "candidate_hash": "c" * 64, "repository": str(self.repo.resolve()), "workdir": str(self.repo.resolve()), "export_dir": str(self.run.resolve())}
+        (authority / "authority.json").write_text(json.dumps({**common, "terminal_state": "BASELINE_CAPTURED"}))
+        (authority / "capture.json").write_text(json.dumps({**common, "patch_digest": hashlib.sha256(patch_text.encode()).hexdigest(), "terminal_state": "DIFF_CAPTURED"}))
+        (self.run / "baseline-snapshot.json").write_text(json.dumps({"version": 2, "head": baseline, "tree": tree, "run_id": authority.name, "authority_dir": str(authority), "object_dir": str(authority / "objects")}))
+        (self.run / "diff.patch").write_text(patch_text)
+        (authority / "diff.patch").write_text(patch_text)
+
         command = "printf '%s\\n' 'two words' | grep -q '^two words$'; test \"$(cat hello.txt)\" = hello"
         os.environ.update(REVIEW_TEST_CMD=command, REVIEW_VERIFY_CMD=command, REVIEW_CLEAN_VERIFY="true")
         bundle = MODULE.collect()
