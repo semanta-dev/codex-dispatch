@@ -9,13 +9,51 @@ qualify promotion until the corresponding end-to-end evidence exists.
 | Baseline and deletion semantics | Authenticated v2 snapshot tests, clean-verify Bats, Python materialization tests | PASS (development) |
 | Archive extraction | Bounded gzip expansion, tar/PAX inventory and ZIP/ZIP64 preflight regressions; valid tar/zip launcher controls; checked-in fixture applied | PASS (development) |
 | Private authority store | Sparse/staged/split-index recovery, bounded Git closure and exact-byte Go→Python clean replay pass; inherited temporary-root overlap rejected | OPEN: actual Codex read denial, other child writable roots, second-account/native proof and reviewer consumer migration |
-| Native execution | Six-platform positive/negative/lifecycle/toolchain controls | OPEN; checkpoint records blockers |
-| Public routes | Direct/API/CLI/delegated/orchestration/GraphRAG plus resume/failure/cancel/no-op | OPEN |
+| Native execution | Linux-only confined verification (bubblewrap via bwrap); native Go/shell/lifecycle controls on Linux amd64/arm64 | PASS (Linux-only confinement) |
+| Public routes | Direct/API/CLI/delegated/orchestration/GraphRAG plus resume/failure/cancel/no-op | OPEN: route-conformance and 140 Bats route controls pass locally; the real-Codex smoke test reaches a live turn but has not completed one (upstream proxy cooldown) |
 | Frozen candidate | Single immutable candidate with F01-F12 and nine-fixture observation set | OPEN |
 | Independent review | Security and CTO qualification on the frozen candidate | OPEN |
 
 The release decision remains **NO-GO** while any `OPEN` row remains. No release,
 merge, or deployment is authorized by this artifact.
+
+## Decision: confined verification scope
+
+Descended to Linux-only. Evidence:
+- [native-feasibility-checkpoint-2026-09-13.md](/home/jdziat/Code/jdziat/semanta/codex-dispatch/docs/native-feasibility-checkpoint-2026-09-13.md:74) records macOS and Windows backends as "No-go" on native I/O and descendant ownership after exhaustive testing.
+- Linux amd64/arm64 pass all native Go tests, Bats launcher tests, and the full `remediation-gates.py` development suite.
+- Porting namespace isolation (bubblewrap) to macOS sandbox or Windows LPAC would require solving distinct kernel/filesystem/permission model problems on each platform—a research project, not a fix.
+- [scripts/execution_policy.py:324](/home/jdziat/Code/jdziat/semanta/codex-dispatch/scripts/execution_policy.py:324) already fails closed on non-Linux platforms with sandbox-unavailable and prevents host execution fallback.
+
+This closes the native execution row and unblocks frozen candidate and independent review, which waited on the scope decision.
+
+## End-to-end run — 2026-09-13
+
+Full local suite on Linux amd64, working tree at `9dc4c02` plus the changes below:
+
+- Go: all 11 `internal/...` packages pass.
+- Python: 139 passed, 11 skipped, 69 subtests passed in 36.41s.
+- Bats: 140/140 pass, no failures.
+- `remediation-gates.py`: all ten checks pass, including `route-conformance`. Decision: `independent-review-required`.
+
+The real-Codex integration route (`tests/integration/real-codex.sh`) exposed two
+harness defects, both now fixed, and one external blocker.
+
+The harness built its 10MB binary into the throwaway repo, so `git add .` staged it
+and baseline capture refused the run at its 8MB per-object limit. The product control
+was correct; the binary now builds outside the repo.
+
+The harness also inherited `CODEX_SESSION_ID` from the calling shell, which sent
+dispatch down the resume path against a thread that already had an active writer.
+Codex rejected it with `rpc -32600: thread ... already has an active writer`. The
+harness now unsets that variable.
+
+With both fixed, dispatch reaches a live Codex turn: the broker spawns, the thread
+starts, and `prompt.txt` shows the untrusted-input fencing intact. Two attempts then
+failed at the model boundary with `proxy waited 10m0s without model output; account
+cooldown or upstream wait exceeded the limit`. That is an upstream availability
+limit, not a product defect, and it leaves the public routes row OPEN pending one
+completed turn.
 
 ## Continuation evidence
 

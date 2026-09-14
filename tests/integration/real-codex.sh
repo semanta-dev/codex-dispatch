@@ -16,16 +16,20 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d)"
+# The binary must live outside the throwaway repo. Building it into $WORK made
+# "git add ." stage a ~10MB object, which baseline capture correctly refuses
+# (per-object limit is 8MB), so dispatch aborted before reaching Codex.
+BIN_DIR="$(mktemp -d)"
 cleanup() {
   if [ -f "$WORK/.codex-dispatch/broker.pid" ]; then
     kill "$(cat "$WORK/.codex-dispatch/broker.pid")" 2>/dev/null || true
   fi
-  rm -rf "$WORK"
+  rm -rf "$WORK" "$BIN_DIR"
 }
 trap cleanup EXIT
 
 echo "==> build codex-dispatch"
-go build -o "$WORK/codex-dispatch" "$REPO_ROOT/cmd/codex-dispatch"
+go build -o "$BIN_DIR/codex-dispatch" "$REPO_ROOT/cmd/codex-dispatch"
 
 cd "$WORK"
 echo "==> init throwaway repo at $WORK"
@@ -35,13 +39,19 @@ git config user.name t
 echo "init" > README.md
 git add . && git commit -q -m init
 
+# Do not inherit a caller's session. CODEX_SESSION_ID makes dispatch take the
+# resume path; when the caller is a live Codex session, codex rejects the
+# resume with "thread already has an active writer" and the smoke test fails
+# for a reason unrelated to the broker.
+unset CODEX_SESSION_ID
+
 export CODEX_TASK="create a file named greeting.txt containing the single word Hello"
 export CODEX_ACCEPTANCE="greeting.txt exists and contains 'Hello'"
 export CODEX_SANDBOX="workspace-write"
 export CLAUDE_SESSION_ID="real-codex-smoke-$$"
 
 echo "==> dispatch (broker auto-spawned)"
-"$WORK/codex-dispatch" dispatch
+"$BIN_DIR/codex-dispatch" dispatch
 
 # Locate the most recent run dir. find handles non-alphanumeric paths and is
 # what shellcheck prefers; the ts-pid run-dir scheme sorts identically to mtime.

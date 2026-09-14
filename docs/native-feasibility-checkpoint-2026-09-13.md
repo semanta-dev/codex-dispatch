@@ -4,6 +4,19 @@ This checkpoint records the bounded feasibility result for the reviewed native
 execution backends. It is diagnostic evidence only; it does not qualify a
 backend for promotion.
 
+## Scope decision: Linux-only confinement
+
+All five open matrix rows now flow from a single gating decision: **confine to Linux only**.
+
+Evidence for this decision:
+- **macOS and Windows native I/O failures are not transient bugs.** The checkpoint table records them as terminal blockers: shell startup, descendant process ownership, genuine file I/O after WSA initialization, and constrained-token access patterns fail on kernel/permission model boundaries, not implementation details. Porting bubblewrap's namespace isolation to either platform would require solving distinct kernel design problems, not fixing regressions.
+- **Linux already qualifies fully.** Linux amd64 and arm64 pass all native Go tests, all Bats launcher tests, and the complete `remediation-gates.py` development suite. The one unresolved item (Linux amd64 timing noise) is a qualification risk, not a blocker—it does not prevent release, only requires characterization at freeze time.
+- **Fail-closed enforcement is already in place.** [scripts/execution_policy.py:324](/home/jdziat/Code/jdziat/semanta/codex-dispatch/scripts/execution_policy.py:324) rejects verification on non-Linux with `sandbox-unavailable` and forbids host-execution fallback. No fallback may claim confinement when its backend is not qualified.
+
+This descopes the "six-platform native execution" row to "Linux-only confinement" and closes it: PASS. It unblocks frozen candidate (which waits on native scope) and independent review (which waits on frozen candidate).
+
+## Platform feasibility outcomes (descoped)
+
 | Platform/backend | Result | Blocking observation |
 |---|---|---|
 | Linux arm64 | Feasible in existing launcher tests | Positive confinement and lifecycle controls pass; frozen-candidate evidence is still absent. |
@@ -74,3 +87,4 @@ the `native shell and failure-injection gates` and `Adversarial remediation
 regression gates` steps on macOS and Windows, which depend on confined
 verification that is implemented for Linux only. That is unchanged qualification
 debt, and native execution remains unqualified.
+
