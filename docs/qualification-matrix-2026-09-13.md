@@ -10,7 +10,7 @@ qualify promotion until the corresponding end-to-end evidence exists.
 | Archive extraction | Bounded gzip expansion, tar/PAX inventory and ZIP/ZIP64 preflight regressions; valid tar/zip launcher controls; checked-in fixture applied | PASS (development) |
 | Private authority store | Sparse/staged/split-index recovery, bounded Git closure and exact-byte Go→Python clean replay pass; inherited temporary-root overlap rejected | OPEN: actual Codex read denial, other child writable roots, second-account/native proof and reviewer consumer migration |
 | Native execution | Linux-only confined verification (bubblewrap via bwrap); native Go/shell/lifecycle controls on Linux amd64/arm64 | PASS (Linux-only confinement) |
-| Public routes | Direct/API/CLI/delegated/orchestration/GraphRAG plus resume/failure/cancel/no-op | OPEN: route-conformance and 140 Bats route controls pass locally; the real-Codex smoke test reaches a live turn but has not completed one (upstream proxy cooldown) |
+| Public routes | Direct/API/CLI/delegated/orchestration/GraphRAG plus resume/failure/cancel/no-op; real-Codex smoke: PASS (session 01a0b1a3-d0ee-7d90-ac83-7dc3853b7c42, exit_code 0, greeting.txt created, 65 log lines) | PASS |
 | Frozen candidate | Single immutable candidate with F01-F12 and nine-fixture observation set | OPEN |
 | Independent review | Security and CTO qualification on the frozen candidate | OPEN |
 
@@ -26,6 +26,21 @@ Descended to Linux-only. Evidence:
 - [scripts/execution_policy.py:324](/home/jdziat/Code/jdziat/semanta/codex-dispatch/scripts/execution_policy.py:324) already fails closed on non-Linux platforms with sandbox-unavailable and prevents host execution fallback.
 
 This closes the native execution row and unblocks frozen candidate and independent review, which waited on the scope decision.
+
+## End-to-end run — 2026-09-17
+
+Proxy auth fix: `env_key = "CODEX_PROXY_API_KEY"` was commented out in `config.toml`,
+so every dispatch request reached the proxy with no bearer token and was rejected with
+503 before the proxy tried any account. Uncommenting it and setting the env var at
+dispatch time fixed the issue.
+
+Real-Codex smoke test result:
+- Session: `01a0b1a3-d0ee-7d90-ac83-7dc3853b7c42`
+- `exit_code`: 0
+- `greeting.txt` created and verified by the harness
+- 65 log lines; `turn/completed` present
+
+This closes the public routes row and unblocks frozen candidate and independent review.
 
 ## End-to-end run — 2026-09-13
 
