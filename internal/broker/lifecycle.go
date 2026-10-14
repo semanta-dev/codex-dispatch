@@ -20,14 +20,15 @@ func AcquirePIDFile(path string) (func(), error) {
 	for {
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			if _, err := file.Write(pidBytes); err == nil {
-				err = file.Close()
+			var werr error
+			if _, werr = file.Write(pidBytes); werr == nil {
+				werr = file.Close()
 			} else {
 				_ = file.Close()
 			}
-			if err != nil {
+			if werr != nil {
 				_ = os.Remove(path)
-				return nil, fmt.Errorf("write PID file %s: %w", path, err)
+				return nil, fmt.Errorf("write PID file %s: %w", path, werr)
 			}
 			break
 		}

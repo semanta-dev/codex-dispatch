@@ -15,11 +15,6 @@ func WithClaimStore(ctx context.Context, s *ClaimStore) context.Context {
 	return context.WithValue(ctx, claimStoreKey{}, s)
 }
 
-func claimStoreFrom(ctx context.Context) *ClaimStore {
-	s, _ := ctx.Value(claimStoreKey{}).(*ClaimStore)
-	return s
-}
-
 // HandleClaimAcquire returns a Handler for claim.acquire.
 func HandleClaimAcquire(s *ClaimStore) Handler {
 	return func(_ context.Context, raw json.RawMessage) (any, error) {
