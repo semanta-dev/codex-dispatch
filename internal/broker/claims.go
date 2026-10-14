@@ -275,7 +275,7 @@ func (s *ClaimStore) expireLocked() {
 // absolute paths and traversal: claims are repo-relative.
 func normaliseClaimPath(p string) string {
 	p = strings.TrimSpace(p)
-	if p == "" || filepath.IsAbs(p) || strings.Contains(p, "..") {
+	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") || strings.Contains(p, "..") {
 		return ""
 	}
 	return filepath.ToSlash(filepath.Clean(p))
