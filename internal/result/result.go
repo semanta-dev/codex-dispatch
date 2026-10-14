@@ -6,8 +6,8 @@ package result
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
+
+	"github.com/semanta-dev/codex-dispatch/internal/artifact"
 )
 
 // Result is the spec §5.1 frozen shape. Field tags and order are normative.
@@ -36,12 +36,17 @@ type Result struct {
 // Write marshals r to <dir>/result.json. Normalizes nil slice to empty array
 // so the JSON shape is stable.
 func Write(dir string, r Result) error {
-	if r.FilesChanged == nil {
-		r.FilesChanged = []string{}
-	}
-	b, err := json.Marshal(r)
+	b, err := Encode(r)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644)
+	return artifact.WriteAtomic(dir, "result.json", b, 0600)
+}
+
+// Encode preserves the public field order and normalized empty file list.
+func Encode(r Result) ([]byte, error) {
+	if r.FilesChanged == nil {
+		r.FilesChanged = []string{}
+	}
+	return json.Marshal(r)
 }

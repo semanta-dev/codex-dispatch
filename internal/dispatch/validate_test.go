@@ -3,21 +3,24 @@ package dispatch
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-// requireCodex skips the calling test when the codex binary is not on PATH.
-// Validate's check order is git-repo → codex-on-PATH → env vars → sandbox, so
-// any test that expects Validate to reach the post-LookPath checks must call
-// this guard.
+// These cases only need LookPath to succeed; they never execute a vendor CLI.
 func requireCodex(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("codex"); err != nil {
-		t.Skip("codex not on PATH; skipping test")
+	dir := t.TempDir()
+	name := "codex"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
 	}
+	if err := os.WriteFile(filepath.Join(dir, name), nil, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func setupGitRepo(t *testing.T) string {

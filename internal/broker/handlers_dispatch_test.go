@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
@@ -91,9 +92,6 @@ func waitForLogContains(t *testing.T, path, substr string, timeout time.Duration
 
 func setupFakeAppserver(t *testing.T, env map[string]string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver unavailable on Windows")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -110,6 +108,9 @@ func setupFakeAppserver(t *testing.T, env map[string]string) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	cmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -133,6 +134,7 @@ func TestDispatchRunHappyPath(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -185,6 +187,7 @@ func TestDispatchRunUsesRequestCWDForThreadStart(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: brokerDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -209,7 +212,8 @@ func TestDispatchRunUsesRequestCWDForThreadStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rpc log: %v", err)
 	}
-	if !strings.Contains(string(raw), `"cwd":"`+worktreeDir+`"`) {
+	encodedCWD, _ := json.Marshal(worktreeDir)
+	if !strings.Contains(string(raw), `"cwd":`+string(encodedCWD)) {
 		t.Fatalf("thread/start did not use request cwd %q:\n%s", worktreeDir, raw)
 	}
 }
@@ -224,6 +228,7 @@ func TestDispatchRunStreamsEventsToCallback(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -270,6 +275,7 @@ func TestDispatchRunMapsFailedStatus(t *testing.T) {
 	})
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -295,6 +301,7 @@ func TestDispatchRunTaskTableReflectsState(t *testing.T) {
 	setupFakeAppserver(t, map[string]string{"FAKE_CODEX_VERSION": "0.130.0", "FAKE_APPSERVER_SESSION": "tx"})
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -330,6 +337,7 @@ func TestDispatchRunStaleResumeRetriesFresh(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -426,6 +434,7 @@ func TestCancelRunningTaskInterruptsTurnAndFreesSlot(t *testing.T) {
 
 	// cap=1 so the second task can only run after the first frees its slot.
 	state := &BrokerState{Table: NewTable(1, 2048), CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	addr := startTestBroker(t, state)
 
 	dialer, err := Dial(addr)
@@ -575,6 +584,7 @@ func TestConcurrentTaskStartSharedAppServerNoCrossTurnCorruption(t *testing.T) {
 	// thread (matching the per-thread single-turn constraint). Long idle so
 	// idle-out is not what ends the test.
 	state := &BrokerState{Table: NewTable(1, 2048), CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	addr, _ := startGuardedBroker(t, state, time.Hour)
 
 	const n = 4
@@ -684,6 +694,7 @@ func TestWedgedTurnHitsPerTurnDeadline(t *testing.T) {
 	t.Setenv("CODEX_BROKER_TURN_TIMEOUT_MS", "200")
 
 	state := &BrokerState{Table: NewTable(1, 2048), CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 	addr := startTestBroker(t, state)
 	client, err := Dial(addr)
 	if err != nil {
@@ -748,6 +759,7 @@ func TestDispatchRunSandboxPreflightFailsFast(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -805,6 +817,7 @@ func TestDispatchRunSandboxPreflightSkippedForDangerFullAccess(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -842,6 +855,7 @@ func TestDispatchRunDropsRealThreadStartedAndSynthesizesOne(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -899,5 +913,88 @@ func TestDispatchRunDropsRealThreadStartedAndSynthesizesOne(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"id":"thread-synth"`) {
 		t.Fatalf("log synthesized thread/started missing thread id:\n%s", raw)
+	}
+}
+
+// Cancellation can win while StartTurn is still awaiting its RPC response.
+// A subsequent context error must preserve the task's recorded terminal state.
+func TestDispatchFailurePreservesExistingTerminalState(t *testing.T) {
+	for _, terminal := range []State{StateCancelled, StateDone, StateErrored} {
+		t.Run(string(terminal), func(t *testing.T) {
+			state := &BrokerState{Table: NewTable(1, 64)}
+			id, _ := state.Table.Start("claude-session", TaskParams{Mode: "fresh"})
+			if err := state.Table.MarkRunning(id); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch terminal {
+			case StateCancelled:
+				err = state.Table.Cancel(id)
+			case StateDone:
+				err = state.Table.MarkDone(id, 0, "codex-session", false)
+			case StateErrored:
+				err = state.Table.MarkErrored(id, 17, "original failure")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := state.Table.Status(id)
+			log, err := OpenLogWriter(filepath.Join(t.TempDir(), "stdout.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer log.Close()
+			var events []string
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			result := dispatchFailure(ctx, state, log, id, "start turn: context canceled", func(kind string, _ any) { events = append(events, kind) })
+			if result.State != string(before.State) || result.ExitCode != before.ExitCode {
+				t.Fatalf("wire state=%s exit=%d, recorded state=%s exit=%d", result.State, result.ExitCode, before.State, before.ExitCode)
+			}
+			wantEvent := map[State]string{StateCancelled: "task.cancelled", StateDone: "task.finished", StateErrored: "task.errored"}[terminal]
+			if len(events) != 1 || events[0] != wantEvent {
+				t.Fatalf("terminal events=%v, want only %s", events, wantEvent)
+			}
+			if terminal == StateErrored && result.ErrorMessage != "original failure" {
+				t.Fatalf("original failure replaced: %q", result.ErrorMessage)
+			}
+		})
+	}
+}
+
+func TestDispatchSetupFailureClassifiesContextCancellation(t *testing.T) {
+	for _, cancelled := range []bool{true, false} {
+		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+			state := &BrokerState{Table: NewTable(1, 64)}
+			id, _ := state.Table.Start("claude-session", TaskParams{Mode: "fresh"})
+			if err := state.Table.MarkRunning(id); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			if cancelled {
+				cancel()
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			}
+			defer cancel()
+			log, err := OpenLogWriter(filepath.Join(t.TempDir(), "stdout.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer log.Close()
+			var events []string
+			result := dispatchFailure(ctx, state, log, id, "interrupted setup RPC", func(kind string, _ any) { events = append(events, kind) })
+			want, event := StateErrored, "task.errored"
+			if cancelled {
+				want, event = StateCancelled, "task.cancelled"
+			}
+			recorded, _ := state.Table.Status(id)
+			if result.State != string(want) || recorded.State != want || result.ExitCode == 0 || recorded.ExitCode != result.ExitCode {
+				t.Fatalf("result=%+v recorded=%+v want=%s", result, recorded, want)
+			}
+			if len(events) != 1 || events[0] != event {
+				t.Fatalf("events=%v want=%s", events, event)
+			}
+		})
 	}
 }

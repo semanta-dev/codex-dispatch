@@ -1,0 +1,47 @@
+{
+  "fail-approach": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "fail-criterion": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "fail-quality": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "fail-scope": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "fail-tests": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "pass-binary-deletion": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "pass-mode-only": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "pass-no-tests-flag": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  },
+  "pass-simple": {
+    "matched": 10,
+    "runs": 10,
+    "pass": true
+  }
+}

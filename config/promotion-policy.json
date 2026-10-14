@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "platforms": ["linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64", "windows-arm64"],
+  "checks": {
+    "F01": "verification-confinement-and-credential-isolation",
+    "F02": "interrupt-descendant-drain",
+    "F03": "reject-live-tree-and-index-drift",
+    "F04": "unique-normalized-packet-inventory",
+    "F05": "effective-verification-workdir",
+    "F06": "terminal-failure-evidence",
+    "F07": "bounded-verification-time-and-output",
+    "F08": "cold-cache-selected-artifact-install",
+    "F09": "no-flock-cleanup-and-concurrency",
+    "F10": "public-route-conformance",
+    "F11": "truthful-serial-execution-contract",
+    "F12": "injected-child-failure-detection",
+    "positive-control": "confined-legitimate-verification-succeeds",
+    "native-lifecycle": "native-process-lifecycle"
+  },
+  "fixtures": ["fail-approach", "fail-criterion", "fail-quality", "fail-scope", "fail-tests", "pass-binary-deletion", "pass-mode-only", "pass-no-tests-flag", "pass-simple"],
+  "minimum_fixture_score": 8,
+  "fixture_observations": 10,
+  "paired_trials_per_arm": 30,
+  "minimum_plugin_accepted": 27,
+  "maximum_latency_ratio": 1.25,
+  "maximum_cost_ratio": 1.25
+}

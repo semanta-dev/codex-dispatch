@@ -16,9 +16,32 @@ import (
 	"github.com/semanta-dev/codex-dispatch/internal/broker"
 )
 
-// chdirTo changes the test process's cwd for the duration of the test. The
-// codex subprocess inherits cwd, so tests that exercise FAKE_APPSERVER_EDIT
-// should chdir into the temp repo to keep stray artifacts out of the source tree.
+// Relative paths retain the invocation directory across execution scoping.
+func TestRelativeResultDirectoryUsesInvocationDirectory(t *testing.T) {
+	repo := setupGitRepo(t)
+	chdirTo(t, repo)
+	dir, log, err := PrepareRunDir(Env{WorkDir: repo, ResultDir: "relative-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameDir(dir, filepath.Join(repo, "relative-run")) || log != filepath.Join(dir, "stdout.log") {
+		t.Fatalf("incorrect paths: %s %s", dir, log)
+	}
+	// The broker owns exclusive log creation; the client must not truncate a
+	// pre-existing artifact through a symlink or hard link before validation.
+	if err := os.WriteFile(log, []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := PrepareRunDir(Env{WorkDir: repo, ResultDir: "relative-run"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil || string(b) != "preserve" {
+		t.Fatalf("client truncated artifact: %q %v", b, err)
+	}
+}
+
+// chdirTo scopes working-directory changes to the lifetime of a test.
 func chdirTo(t *testing.T, dir string) {
 	t.Helper()
 	old, err := os.Getwd()
@@ -36,9 +59,6 @@ func chdirTo(t *testing.T, dir string) {
 // in internal/broker/handlers_dispatch_test.go.
 func installFakeAppserver(t *testing.T, env map[string]string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver unavailable on Windows")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -55,6 +75,9 @@ func installFakeAppserver(t *testing.T, env map[string]string) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	cmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -97,6 +120,7 @@ func startInProcessBroker(t *testing.T, repoDir string) {
 	}()
 	t.Cleanup(func() {
 		cancel()
+		state.CloseAppServer(context.Background())
 		<-done
 	})
 
@@ -140,8 +164,14 @@ func TestRunHappyPathWritesResultJSON(t *testing.T) {
 	if i := strings.LastIndex(out, "\n"); i >= 0 {
 		last = out[i+1:]
 	}
-	if last != filepath.Join(repo, "run") {
-		t.Fatalf("last stdout line = %q, want %q", last, env.ResultDir)
+	// Run reports the resolved result directory: on macOS the temporary repo is
+	// reached through /var -> /private/var.
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(repo, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last != wantDir {
+		t.Fatalf("last stdout line = %q, want %q", last, wantDir)
 	}
 	raw, err := os.ReadFile(filepath.Join(env.ResultDir, "result.json"))
 	if err != nil {
@@ -576,15 +606,18 @@ func TestRunTimeoutFromEnvReturnsPromptlyWithStatus(t *testing.T) {
 // TestRunBaselineCaptureFailureIsSurfaced checks that a failure to write the
 // diff baseline aborts the run with a surfaced error instead of proceeding to
 // codex (which would silently mis-attribute files_changed). The failure is
-// forced by pre-creating baseline-pre-files.txt as a directory so the baseline
+// forced by pre-creating baseline-snapshot.json as a directory so the baseline
 // write cannot succeed.
 func TestRunBaselineCaptureFailureIsSurfaced(t *testing.T) {
 	requireCodex(t)
 	repo := setupGitRepo(t)
 	chdirTo(t, repo)
 	resultDir := filepath.Join(repo, "run-baseline-fail")
-	if err := os.MkdirAll(filepath.Join(resultDir, "baseline-pre-files.txt"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(resultDir, "baseline-snapshot.json"), 0o755); err != nil {
 		t.Fatalf("seed obstructing dir: %v", err)
+	}
+	if err := os.Chmod(resultDir, 0o700); err != nil {
+		t.Fatalf("make result dir private: %v", err)
 	}
 	env := Env{
 		WorkDir:    repo,
@@ -642,7 +675,7 @@ func TestRunThreadsSubdirCwdToCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read recorded cwd: %v", err)
 	}
-	if string(got) != sub {
+	if !SameDir(string(got), sub) {
 		t.Fatalf("codex received cwd %q, want module subdir %q (cwd collapsed to repo root is the bug)", got, sub)
 	}
 }
@@ -659,6 +692,9 @@ func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
 	// The module manifest is what makes server/ a module for derivation.
 	if err := os.WriteFile(filepath.Join(sub, "go.mod"), []byte("module x/server\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "server_hello.go"), []byte("seed-marker-before-autoscope"), 0644); err != nil {
+		t.Fatal(err)
 	}
 	rec := filepath.Join(t.TempDir(), "cwd.txt")
 	installFakeAppserver(t, map[string]string{
@@ -680,11 +716,185 @@ func TestRunAutoScopesToModuleFromFiles(t *testing.T) {
 	if _, err := Run(env, io.Discard, io.Discard); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	effective, err := os.ReadFile(filepath.Join(env.ResultDir, "effective-workdir.txt"))
+	if err != nil || !SameDir(strings.TrimSpace(string(effective)), sub) {
+		t.Fatalf("authoritative verification cwd = %q, err=%v, want %q", effective, err, sub)
+	}
+	assembled, err := os.ReadFile(filepath.Join(env.ResultDir, "prompt.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(assembled), "seed-marker-before-autoscope") {
+		t.Fatalf("seed content missing after auto-scope: %s", assembled)
+	}
 	got, err := os.ReadFile(rec)
 	if err != nil {
 		t.Fatalf("read recorded cwd: %v", err)
 	}
-	if string(got) != sub {
+	if !SameDir(string(got), sub) {
 		t.Fatalf("codex cwd = %q, want auto-derived module %q (scoping from CODEX_FILES failed)", got, sub)
+	}
+}
+
+func TestRunCaptureFailureIsExplicitAndInvalidatesPatch(t *testing.T) {
+	repo := setupGitRepo(t)
+	dir := filepath.Join(repo, "run")
+	installFakeAppserver(t, map[string]string{
+		"FAKE_CODEX_VERSION":     "0.130.0",
+		"FAKE_APPSERVER_SESSION": "s-corrupt-baseline",
+		"FAKE_APPSERVER_EDIT":    filepath.Join(dir, "baseline-snapshot.json") + ":{\n" + filepath.Join(dir, "diff.patch") + ":stale",
+	})
+	startInProcessBroker(t, repo)
+	chdirTo(t, repo)
+	rc, err := Run(Env{WorkDir: repo, Task: "t", Acceptance: "a", Sandbox: "workspace-write", ResultDir: dir}, io.Discard, io.Discard)
+	if rc != 1 || err == nil {
+		t.Fatalf("capture failure accepted: %d %v", rc, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r map[string]any
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r["exit_code"] != float64(1) || r["diff_path"] != "" || !strings.Contains(r["error_message"].(string), "capture-diff failed") {
+		t.Fatalf("misleading failure: %s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "diff.patch")); !os.IsNotExist(err) {
+		t.Fatalf("stale patch remains: %v", err)
+	}
+}
+
+func TestCancelledBrokerWithEditsCannotWriteSuccessResult(t *testing.T) {
+	requireCodex(t)
+	repo := setupGitRepo(t)
+	chdirTo(t, repo)
+	addr := filepath.Join(repo, ".codex-dispatch", "broker.addr")
+	if err := os.MkdirAll(filepath.Dir(addr), 0755); err != nil {
+		t.Fatal(err)
+	}
+	srv := broker.NewServer("127.0.0.1:0")
+	srv.SetAddrFile(addr)
+	srv.HandleFunc("broker.ping", func(context.Context, json.RawMessage) (any, error) { return map[string]string{"version": "test"}, nil })
+	srv.HandleFunc("dispatch.run", func(_ context.Context, raw json.RawMessage) (any, error) {
+		var params broker.DispatchRunParams
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(repo, "partial.txt"), []byte("unfinished edit\n"), 0644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(params.LogPath, nil, 0644); err != nil {
+			return nil, err
+		}
+		return broker.DispatchRunResult{State: string(broker.StateCancelled), ExitCode: 0, SessionID: "cancelled-session"}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = srv.Serve(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(addr); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("broker did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	env := Env{WorkDir: repo, Task: "write partial.txt", Acceptance: "complete the task", Sandbox: "workspace-write", ResultDir: filepath.Join(repo, ".codex-dispatch", "runs", "cancelled")}
+	var out, stderr strings.Builder
+	if rc, err := Run(env, &out, &stderr); rc != 0 || err != nil {
+		t.Fatalf("dispatch failed to retain result: rc=%d err=%v stderr=%s", rc, err, stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(env.ResultDir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		ExitCode int      `json:"exit_code"`
+		Files    []string `json:"files_changed"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == 0 || len(result.Files) == 0 {
+		t.Fatalf("cancellation with real edits misrepresented: %s", raw)
+	}
+	if body, err := os.ReadFile(filepath.Join(repo, "partial.txt")); err != nil || string(body) != "unfinished edit\n" {
+		t.Fatal("partial edits were lost")
+	}
+}
+
+// A result directory reached through a symlinked ancestor must be usable: macOS
+// reaches every temporary directory through /var -> /private/var, and rejecting
+// the whole chain made every native run fail. A symlinked leaf must still be
+// refused so the export destination cannot be silently redirected.
+func TestResultDirResolvesAncestorSymlinkAndRejectsLeafSymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Ancestor symlink: accepted, and reported as the resolved location.
+	through := filepath.Join(link, "runs", "one")
+	got, err := ensureResultDir(Env{ResultDir: through}, base)
+	if err != nil {
+		t.Fatalf("rejected result directory through symlinked ancestor: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(real, "runs", "one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("result dir %s did not resolve to %s", got, want)
+	}
+
+	// Leaf symlink: refused rather than silently redirected.
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(base, "leaf")
+	if err := os.Symlink(target, leaf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureResultDir(Env{ResultDir: leaf}, base); err == nil {
+		t.Fatal("accepted a symlinked result directory leaf")
+	}
+}
+
+func TestEffectiveWorkdirDoesNotFollowPlantedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(outside, []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "effective-workdir.txt")
+	if err := os.Symlink(outside, target); err != nil {
+		t.Skipf("symlink privilege unavailable: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := writeEffectiveWorkdir(root, "/actual/module"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(outside)
+	if err != nil || string(got) != "preserve" {
+		t.Fatalf("outside sentinel changed: %q %v", got, err)
+	}
+	recorded, err := os.ReadFile(target)
+	if err != nil || string(recorded) != "/actual/module\n" {
+		t.Fatalf("wrong authoritative cwd: %q %v", recorded, err)
 	}
 }

@@ -200,9 +200,6 @@ func TestCaptureDiffOneArgIsError(t *testing.T) {
 }
 
 func TestRunDispatchEndToEnd(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver requires posix exec/signal handling")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -220,6 +217,9 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 	// Build fake-appserver as `codex` and put it first on PATH.
 	fakeDir := t.TempDir()
 	bin := filepath.Join(fakeDir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	bcmd := exec.Command("go", "build", "-o", bin, ".")
 	bcmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := bcmd.CombinedOutput(); err != nil {
@@ -269,12 +269,13 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -295,15 +296,21 @@ func TestRunDispatchEndToEnd(t *testing.T) {
 	if i := strings.LastIndex(last, "\n"); i >= 0 {
 		last = last[i+1:]
 	}
-	if last != filepath.Join(repo, "run") {
-		t.Fatalf("stdout last line = %q, want %q", last, filepath.Join(repo, "run"))
+	// dispatch reports the resolved result directory: on macOS the temporary repo
+	// is reached through /var -> /private/var.
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(repo, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last != wantDir {
+		t.Fatalf("stdout last line = %q, want %q", last, wantDir)
 	}
 }
 
 func TestDispatchListFlag(t *testing.T) {
 	// Smoke: --list with no broker reachable produces a clear error.
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 
 	dir := t.TempDir()
 	// not a git repo
@@ -407,7 +414,7 @@ func installStubCodex(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "codex")
 	if runtime.GOOS == "windows" {
-		bin += ".bat"
+		bin += ".exe"
 	}
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), fs.FileMode(0o755)); err != nil {
 		t.Fatalf("write stub codex: %v", err)
@@ -420,9 +427,6 @@ func installStubCodex(t *testing.T) {
 // task.start is rejected because the broker registers only broker.ping), the
 // run dir we created must be removed, not left behind.
 func TestDetachFailedSetupLeavesNoOrphanDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("broker fixture requires posix exec/signal handling")
-	}
 	// Stub codex on PATH so Validate passes and execution reaches PrepareRunDir
 	// (which creates the run dir we then assert is cleaned up). Without this the
 	// test is environment-dependent: it would pass trivially via ErrCodexNotFound
@@ -469,12 +473,13 @@ func TestDetachFailedSetupLeavesNoOrphanDir(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -499,9 +504,6 @@ func TestDetachFailedSetupLeavesNoOrphanDir(t *testing.T) {
 // operator-supplied CODEX_RESULT_DIR that already existed before the run, even
 // when detached setup fails.
 func TestDetachPreexistingResultDirPreserved(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("broker fixture requires posix exec/signal handling")
-	}
 	// Stub codex on PATH so Validate passes and execution reaches PrepareRunDir,
 	// exercising the cleanup path (which must preserve the pre-existing dir)
 	// rather than bailing out early via ErrCodexNotFound.
@@ -544,12 +546,13 @@ func TestDetachPreexistingResultDirPreserved(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
@@ -579,8 +582,11 @@ func TestDetachPreexistingResultDirPreserved(t *testing.T) {
 }
 
 func TestBrokerSubcommandRoutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal routing; native process shutdown is tested separately")
+	}
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
@@ -610,7 +616,11 @@ func TestBrokerSubcommandRoutes(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Now safe to signal.
-	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = self.Signal(syscall.SIGTERM)
 
 	select {
 	case rc := <-done:
@@ -628,9 +638,6 @@ func TestBrokerSubcommandRoutes(t *testing.T) {
 // This is the regression guard for the bug where --detach sent only
 // task+acceptance and silently dropped the rest of the prompt.
 func TestDetachPromptParity(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-appserver requires posix exec/signal handling")
-	}
 	wd, _ := os.Getwd()
 	root := wd
 	for {
@@ -649,6 +656,9 @@ func TestDetachPromptParity(t *testing.T) {
 	// dispatch can run end-to-end and write prompt.txt.
 	fakeDir := t.TempDir()
 	bin := filepath.Join(fakeDir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	bcmd := exec.Command("go", "build", "-o", bin, ".")
 	bcmd.Dir = filepath.Join(root, "tests/fixtures/fake-appserver")
 	if out, err := bcmd.CombinedOutput(); err != nil {
@@ -707,12 +717,13 @@ func TestDetachPromptParity(t *testing.T) {
 	go func() { _ = srv.Serve(bctx); close(bdone) }()
 	t.Cleanup(func() {
 		bcancel()
+		state.CloseAppServer(context.Background())
 		<-bdone
 	})
 	waitFile(t, addrPath)
 
 	old, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(old) })
+	defer func() { _ = os.Chdir(old) }()
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}

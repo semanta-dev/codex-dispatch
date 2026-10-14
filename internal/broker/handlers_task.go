@@ -95,12 +95,13 @@ func HandleTaskStatus(state *BrokerState) Handler {
 // {task_id, queued} immediately and runs the dispatch in the background
 // (no notifier; events are only persisted to the table + log file).
 func HandleTaskStart(state *BrokerState) Handler {
-	return func(_ context.Context, raw json.RawMessage) (any, error) {
+	return func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p DispatchRunParams
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		taskID, queued := state.Table.Start(p.SessionID, TaskParams{
+		p.policy, _ = ctx.Value(executionPolicyKey{}).(*ExecutionPolicy)
+		taskID, queued, err := state.Table.Admit(p.SessionID, TaskParams{
 			Mode:        p.Mode,
 			Prompt:      p.Prompt,
 			Sandbox:     p.Sandbox,
@@ -109,6 +110,9 @@ func HandleTaskStart(state *BrokerState) Handler {
 			LogPath:     p.LogPath,
 			CWD:         p.CWD,
 		})
+		if err != nil {
+			return nil, err
+		}
 		// Track the background goroutine on the broker-lifetime DetachedRunner
 		// (if wired) so broker shutdown/idle-out can drain it instead of yanking
 		// the codex child mid-run. DetachedRunner.Go falls back to a plain
@@ -141,7 +145,7 @@ func runDetached(state *BrokerState, taskID string, p DispatchRunParams) {
 	if err := state.Table.MarkRunning(taskID); err != nil {
 		return
 	}
-	logW, err := OpenLogWriter(p.LogPath)
+	logW, err := openTaskLog(ctx, &p)
 	if err != nil {
 		_ = state.Table.MarkErrored(taskID, -1, err.Error())
 		return
@@ -166,10 +170,11 @@ func HandleTaskCancel(state *BrokerState) Handler {
 		if errors.Is(err, ErrTaskAlreadyTerminal) {
 			return nil, &RPCError{Code: -32007, Message: err.Error()}
 		}
+		// Cancel the live turn even if persisting the cancellation failed.
+		state.cancelTask(params.TaskID)
 		if err != nil {
 			return nil, err
 		}
-		state.cancelTask(params.TaskID)
 		return map[string]any{"ok": true}, nil
 	}
 }

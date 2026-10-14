@@ -57,8 +57,8 @@ Use this order:
      `graphrag-codex-dispatch`.
    - If there is exactly one packet, route to `graphrag-codex-dispatch`.
    - If there are multiple packets, route to `scripts/graphrag-plan-runner.py`.
-     Use `--jobs` equal to the number of packets, capped at `6`, unless the
-     user supplied `--jobs`.
+     Use `--jobs 1` unless the user supplied `--jobs`; dispatch and verification
+     serialize under the checkout lock in both isolation modes.
    - Add `--shared-broker` only when `--prefer cost` is present.
 
 3. **Explicit packet execution language**
@@ -68,7 +68,7 @@ Use this order:
 4. **Simple scoped coding task**
    - If the input is a normal implementation request and does not point at a
      plan file, delegate to the existing `codex-orchestrator` subagent exactly
-     as `/codex` does.
+     through its thin canonical-controller adapter.
 
 5. **Manual Claude route**
    - Choose `manual-claude` only when the work is primarily design,
@@ -81,7 +81,8 @@ Use this order:
 
 ### Route: codex
 
-Use `Task`:
+Use `Task` to the adapter; it invokes `scripts/codex-reviewed.py` with the raw
+request as stdin and returns its validated report. It owns no retry/review loop.
 
 - `subagent_type`: `codex-orchestrator`
 - `description`: `/codex orchestration`

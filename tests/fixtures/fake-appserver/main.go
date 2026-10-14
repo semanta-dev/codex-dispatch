@@ -251,6 +251,37 @@ func (s *fakeState) getThreadID() string {
 	return s.threadID
 }
 
+// Effective settings match the real thread response schema.
+func effectiveThreadResponse(tid string, params json.RawMessage) map[string]any {
+	var p struct {
+		CWD     string                     `json:"cwd"`
+		Model   string                     `json:"model"`
+		Sandbox string                     `json:"sandbox"`
+		Config  map[string]json.RawMessage `json:"config"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if p.CWD == "" {
+		p.CWD, _ = os.Getwd()
+	}
+	if p.Model == "" {
+		p.Model = "fake-model"
+	}
+	mode := map[string]string{"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}[p.Sandbox]
+	if mode == "" {
+		mode = "workspaceWrite"
+	}
+	policy := map[string]any{"type": mode}
+	if mode == "workspaceWrite" {
+		policy["writableRoots"] = []string{p.CWD}
+		for field, key := range map[string]string{"networkAccess": "network_access", "excludeTmpdirEnvVar": "exclude_tmpdir_env_var", "excludeSlashTmp": "exclude_slash_tmp"} {
+			value := false
+			_ = json.Unmarshal(p.Config["sandbox_workspace_write."+key], &value)
+			policy[field] = value
+		}
+	}
+	return map[string]any{"thread": map[string]any{"id": tid, "cwd": p.CWD, "status": "running"}, "cwd": p.CWD, "model": p.Model, "sandbox": policy, "approvalPolicy": "never"}
+}
+
 func (s *fakeState) handleThreadStart(id *json.Number, params json.RawMessage) bool {
 	// FAKE_APPSERVER_RECORD_MODEL=<path>: record the model from thread/start so a
 	// test can assert the CODEX_MODEL pin was threaded through to codex (empty
@@ -275,9 +306,7 @@ func (s *fakeState) handleThreadStart(id *json.Number, params json.RawMessage) b
 	}
 	tid := s.sessionID()
 	s.setThreadID(tid)
-	s.respond(id, map[string]any{
-		"thread": map[string]any{"id": tid, "cwd": ".", "status": "running"},
-	})
+	s.respond(id, effectiveThreadResponse(tid, params))
 	s.notify("thread/started", map[string]any{
 		"thread": map[string]any{"id": tid, "cwd": ".", "status": "running"},
 	})
@@ -299,9 +328,7 @@ func (s *fakeState) handleThreadResume(id *json.Number, params json.RawMessage) 
 		tid = s.sessionID()
 	}
 	s.setThreadID(tid)
-	s.respond(id, map[string]any{
-		"thread": map[string]any{"id": tid, "cwd": ".", "status": "running"},
-	})
+	s.respond(id, effectiveThreadResponse(tid, params))
 	s.notify("thread/started", map[string]any{
 		"thread": map[string]any{"id": tid, "cwd": ".", "status": "running"},
 	})
@@ -365,7 +392,9 @@ func (s *fakeState) handleTurnStart(id *json.Number) bool {
 		if edit == "" {
 			continue
 		}
-		path, content, ok := strings.Cut(edit, ":")
+		volume := filepath.VolumeName(edit)
+		path, content, ok := strings.Cut(strings.TrimPrefix(edit, volume), ":")
+		path = volume + path
 		if !ok {
 			continue
 		}

@@ -1,0 +1,228 @@
+import importlib.util
+import json
+import hashlib
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+SPEC = importlib.util.spec_from_file_location("review_evidence", Path(__file__).resolve().parents[2] / "scripts/review-evidence.py")
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class ReviewEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name).resolve()
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        self.run = self.repo / ".codex-dispatch/runs/test"
+        self.run.mkdir(parents=True)
+        (self.repo / "hello.txt").write_text("hello\n")
+        self.result = {"exit_code": 0, "session_id": "test", "files_changed": ["hello.txt"], "lines_added": 1, "lines_removed": 0}
+        (self.run / "result.json").write_text(json.dumps(self.result))
+        (self.run / "diff.patch").write_text("diff --git a/hello.txt b/hello.txt\n+hello\n")
+        (self.run / "effective-workdir.txt").write_text(str(self.repo))
+        (self.run / "stdout.log").write_text("codex evidence\n")
+        self.scripts = self.run / "scripts"
+        self.scripts.mkdir()
+        (self.scripts / "dispatch-codex.sh").write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(self.run.as_posix()) + "\n")
+        self.addCleanup(patch.stopall)
+        patch.object(MODULE, "ROOT", self.scripts).start()
+        patch.dict(os.environ, {"REVIEW_TEST_CMD": "", "REVIEW_VERIFY_CMD": "", "REVIEW_TEST_POLICY": "run", "REVIEW_CLEAN_VERIFY": "false"}).start()
+        previous = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, previous)
+
+    def test_identical_checks_execute_once_and_preserve_complete_diff(self):
+        command = "printf executed"
+        os.environ.update(REVIEW_TEST_CMD=command, REVIEW_VERIFY_CMD=command)
+        bundle = MODULE.collect()
+        self.assertEqual(bundle["test"]["stdout"], "executed")
+        self.assertTrue(bundle["verification"]["reused_test_execution"])
+        self.assertEqual(bundle["diff"], (self.run / "diff.patch").read_text())
+        self.assertEqual(bundle["changed_file_facts"]["hello.txt"]["kind"], "file")
+
+    def test_mutation_then_restoration_is_still_detected(self):
+        os.environ.update(REVIEW_TEST_CMD="printf changed > hello.txt", REVIEW_VERIFY_CMD="printf 'hello\\n' > hello.txt")
+        bundle = MODULE.collect()
+        self.assertEqual(bundle["verification_mutations"], ["hello.txt"])
+        self.assertEqual((self.repo / "hello.txt").read_text(), "hello\n")
+
+    def test_staging_then_unstaging_is_still_detected(self):
+        os.environ.update(REVIEW_TEST_CMD="git add hello.txt", REVIEW_VERIFY_CMD="git rm --cached hello.txt")
+        bundle = MODULE.collect()
+        self.assertNotEqual(bundle["test"]["exit_code"], 0)
+        self.assertEqual(subprocess.check_output(["git", "ls-files", "--stage"]), b"")
+
+    def test_failing_check_is_not_success(self):
+        os.environ["REVIEW_VERIFY_CMD"] = "printf diagnostic >&2; exit 7"
+        bundle = MODULE.collect()
+        self.assertEqual(bundle["verification"]["exit_code"], 7)
+        self.assertIn("diagnostic", bundle["verification"]["stderr"])
+
+    @unittest.skipUnless(os.name == "posix", "requires Linux clean verification")
+    def test_clean_verification_preserves_arguments_and_shell_semantics(self):
+        import pwd
+        source = Path(__file__).resolve().parents[2] / "scripts/clean-verify.sh"
+        shutil.copy2(source, self.scripts / "clean-verify.sh")
+        shutil.copy2(source.with_name("execution_policy.py"), self.scripts / "execution_policy.py")
+        shutil.copy2(source.with_name("clean_verify.py"), self.scripts / "clean_verify.py")
+        shutil.copy2(source.with_name("owned_process.py"), self.scripts / "owned_process.py")
+        (self.repo / "README.md").write_text("base\n")
+        subprocess.run(["git", "add", "README.md"], check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "base"], check=True)
+        (self.run / "baseline-head.txt").write_bytes(subprocess.check_output(["git", "rev-parse", "HEAD"]))
+        baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+        run_id = "b" * 32
+        authority = Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".codex-dispatch-authority" / hashlib.sha256(self.temp.name.encode()).hexdigest()[:32]
+        self.addCleanup(shutil.rmtree, authority, ignore_errors=True)
+        authority.parent.mkdir(mode=0o700, exist_ok=True)
+        authority.mkdir(mode=0o700)
+        subprocess.run(["git", "init", "--bare", "--quiet", str(authority)], check=True)
+        subprocess.run(["git", "push", "--quiet", str(authority), "HEAD:refs/authority/baseline"], check=True)
+        patch_text = "diff --git a/hello.txt b/hello.txt\nnew file mode 100644\n--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1 @@\n+hello\n"
+        index_bytes = (self.repo / ".git/index").read_bytes()
+        (authority / "baseline-index").write_bytes(index_bytes)
+        index_manifest = json.dumps({"version": 1, "objects": []}, separators=(",", ":")).encode()
+        (authority / "index-objects.json").write_bytes(index_manifest)
+        common = {"version": 2, "run_id": authority.name, "head": baseline, "baseline_tree": tree, "index_digest": hashlib.sha256(index_bytes).hexdigest(), "index_objects_digest": hashlib.sha256(index_manifest).hexdigest(), "index_present": True, "candidate_hash": "c" * 64, "repository": str(self.repo.resolve()), "workdir": str(self.repo.resolve()), "export_dir": str(self.run.resolve())}
+        (authority / "authority.json").write_text(json.dumps({**common, "terminal_state": "BASELINE_CAPTURED"}))
+        (authority / "capture.json").write_text(json.dumps({**common, "patch_digest": hashlib.sha256(patch_text.encode()).hexdigest(), "terminal_state": "DIFF_CAPTURED"}))
+        (self.run / "baseline-snapshot.json").write_text(json.dumps({"version": 2, "head": baseline, "tree": tree, "run_id": authority.name, "authority_dir": str(authority), "object_dir": str(authority / "objects")}))
+        (self.run / "diff.patch").write_text(patch_text)
+        (authority / "diff.patch").write_text(patch_text)
+
+        command = "printf '%s\\n' 'two words' | grep -q '^two words$'; test \"$(cat hello.txt)\" = hello"
+        os.environ.update(REVIEW_TEST_CMD=command, REVIEW_VERIFY_CMD=command, REVIEW_CLEAN_VERIFY="true")
+        bundle = MODULE.collect()
+        self.assertEqual(bundle["verification"]["exit_code"], 0, bundle["verification"])
+        self.assertTrue(bundle["verification"]["clean"])
+        self.assertNotIn("reused_test_execution", bundle["verification"])
+        self.assertFalse(bundle["verification_mutations"])
+        os.environ.update(REVIEW_TEST_CMD="", REVIEW_VERIFY_CMD="printf repaired > hello.txt; test $(cat hello.txt) = repaired")
+        rejected = MODULE.collect()
+        self.assertEqual(rejected["verification"]["exit_code"], 66, rejected["verification"])
+        self.assertIn("hello.txt", rejected["verification"]["stderr"])
+
+    def test_zero_text_lines_preserve_binary_deletion_and_mode_evidence(self):
+        self.result.update(lines_added=0, lines_removed=0)
+        (self.run / "result.json").write_text(json.dumps(self.result))
+        (self.repo / "hello.txt").unlink()
+        (self.run / "diff.patch").write_text("diff --git a/hello.txt b/hello.txt\ndeleted file mode 100644\nBinary files a/hello.txt and /dev/null differ\n")
+        deleted = MODULE.collect()
+        self.assertTrue(deleted["complete"])
+        self.assertEqual(deleted["changed_file_facts"]["hello.txt"]["kind"], "deleted")
+        (self.repo / "hello.txt").write_text("hello\n")
+        (self.repo / "hello.txt").chmod(0o755)
+        (self.run / "diff.patch").write_text("diff --git a/hello.txt b/hello.txt\nold mode 100644\nnew mode 100755\n")
+        mode = MODULE.collect()
+        self.assertTrue(mode["complete"])
+        self.assertEqual(mode["result"]["lines_added"], 0)
+        self.assertIn("new mode 100755", mode["diff"])
+
+    def test_effective_module_detection_uses_recorded_dispatch_scope(self):
+        module = self.repo / 'module with spaces'
+        module.mkdir()
+        (self.repo / 'Makefile').write_text('test:\n\t@true\n')
+        (module / 'Makefile').write_text('test:\n\t@echo module-ran; exit 7\n')
+        (self.run / 'effective-workdir.txt').write_text(str(module))
+        os.environ.update(REVIEW_TEST_CMD='__auto__', CODEX_WORKDIR=str(self.repo))
+        bundle = MODULE.collect()
+        self.assertEqual(bundle['effective_workdir'], str(module))
+        self.assertEqual(bundle['test_command'], 'make test')
+        self.assertNotEqual(bundle['test']['exit_code'], 0)
+        self.assertIn('module-ran', bundle['test']['stdout'])
+
+    def test_drift_during_verification_never_becomes_trusted_baseline(self):
+        os.environ['REVIEW_TEST_CMD'] = 'true'
+        def external_edit(*args):
+            (self.repo / 'hello.txt').write_text('unreviewed')
+            return {'exit_code': 0, 'mutations': []}
+        with patch.object(MODULE, 'check', side_effect=external_edit):
+            bundle = MODULE.collect()
+        self.assertIn('live-tree-drift', bundle['verification_mutations'])
+        self.assertNotEqual(bundle['live_fingerprint'], MODULE.live_fingerprint(self.repo, self.run))
+
+    def test_boolean_exit_code_is_invalid(self):
+        self.result["exit_code"] = False
+        (self.run / "result.json").write_text(json.dumps(self.result))
+        with self.assertRaisesRegex(ValueError, "exit_code"):
+            MODULE.collect()
+
+    def test_oversized_diff_cannot_silently_pass(self):
+        (self.run / "diff.patch").write_text("x" * (MODULE.LIMIT + 1))
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            MODULE.collect()
+
+    def test_failed_dispatch_does_not_run_verification(self):
+        self.result["exit_code"] = 1
+        (self.run / "result.json").write_text(json.dumps(self.result))
+        os.environ["REVIEW_VERIFY_CMD"] = "touch must-not-exist"
+        bundle = MODULE.collect()
+        self.assertEqual(bundle["result"]["exit_code"], 1)
+        self.assertEqual(json.loads((self.run / "review-evidence.json").read_text()), bundle)
+        self.assertFalse((self.repo / "must-not-exist").exists())
+
+class ReceiptChainTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.receipt = Path(self.temp.name) / 'receipt.json'
+        self.identity = {'session_id': 'current', 'prompt_id': 'prompt', 'args_sha256': 'hash'}
+        env = {'REVIEW_RECEIPT_PATH': str(self.receipt), 'REVIEW_INVOCATION_ID': json.dumps(self.identity), 'CODEX_TASK': 'original task'}
+        self.receipt.write_text(json.dumps({'identity': self.identity, 'status': 'complete', 'dispatch_env': env, 'config': {'max_iter': 2, 'no_resume': False}}))
+        active = patch.dict(os.environ, env, clear=True)
+        active.start()
+        self.addCleanup(active.stop)
+
+    def bundle(self, number):
+        return {'run_dir': f'run-{number}', 'result': {'session_id': f'codex-{number}'}}
+
+    def test_chain_counts_before_dispatch_binds_retries_and_enforces_budget(self):
+        def collect():
+            ledger = json.loads(self.receipt.with_suffix('.runs.json').read_text())
+            self.assertEqual(ledger['attempts'][-1]['state'], 'running')
+            return self.bundle(len(ledger['attempts']))
+        with patch.object(MODULE, 'collect', side_effect=collect) as call:
+            MODULE.collect_with_receipt()
+            os.environ['CODEX_SESSION_ID'] = 'codex-1'
+            MODULE.collect_with_receipt()
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                MODULE.collect_with_receipt()
+            self.assertEqual(call.call_count, 2)
+        attempts = json.loads(self.receipt.with_suffix('.runs.json').read_text())['attempts']
+        self.assertEqual([row['run_dir'] for row in attempts], ['run-1', 'run-2'])
+        self.assertEqual(attempts[1]['resume_session'], 'codex-1')
+
+    def test_changed_task_or_foreign_session_never_dispatches(self):
+        with patch.object(MODULE, 'collect') as call:
+            os.environ['CODEX_TASK'] = 'different task'
+            with self.assertRaisesRegex(ValueError, 'parameters'):
+                MODULE.collect_with_receipt()
+            os.environ['CODEX_TASK'] = 'original task'
+            os.environ['CODEX_SESSION_ID'] = 'unrelated-old-session'
+            with self.assertRaisesRegex(ValueError, 'outside'):
+                MODULE.collect_with_receipt()
+            call.assert_not_called()
+
+    def test_failed_attempt_is_retained_and_blocks_silent_reexecution(self):
+        with patch.object(MODULE, 'collect', side_effect=ValueError('capture failed')) as call:
+            with self.assertRaisesRegex(ValueError, 'capture failed'):
+                MODULE.collect_with_receipt()
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                MODULE.collect_with_receipt()
+            self.assertEqual(call.call_count, 1)
+        row = json.loads(self.receipt.with_suffix('.runs.json').read_text())['attempts'][0]
+        self.assertEqual(row['state'], 'failed')
+        self.assertEqual(row['iteration'], 1)
+
+
+if __name__ == '__main__':
+    unittest.main()

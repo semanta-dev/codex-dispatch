@@ -15,6 +15,7 @@ import (
 	"github.com/semanta-dev/codex-dispatch/internal/codex"
 	"github.com/semanta-dev/codex-dispatch/internal/diff"
 	"github.com/semanta-dev/codex-dispatch/internal/dispatch"
+	"github.com/semanta-dev/codex-dispatch/internal/mcp"
 	"github.com/semanta-dev/codex-dispatch/internal/pick"
 	"github.com/semanta-dev/codex-dispatch/internal/prompt"
 )
@@ -37,6 +38,7 @@ var subcommands = []struct {
 	{"capture-diff", "snapshot a result-dir diff: capture-diff <baseline-head> <result-dir>"},
 	{"pick-iterations", "print the recommended iteration count for the current task"},
 	{"broker", "run the persistent codex app-server broker (JSON-RPC over a unix socket)"},
+	{"mcp", "run an MCP stdio server exposing broker tools"},
 	{"hook", "run as a Claude Code hook (reads the hook payload on stdin)"},
 	{"version", "print the codex-dispatch version (also --version, -v)"},
 	{"help", "show this help (also --help, -h)"},
@@ -82,6 +84,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return runDispatchCmd(argv[2:], stdout, stderr)
 	case "broker":
 		return runBroker(argv[2:], os.Stdin, stdout, stderr)
+	case "mcp":
+		return runMCP(stderr)
 	case "hook":
 		return runHook(argv[2:], os.Stdin, stdout, stderr)
 	default:
@@ -368,7 +372,7 @@ func connectBrokerOrFail(stderr io.Writer) (*broker.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return broker.Dial(string(addr))
+	return broker.Dial(strings.TrimSpace(string(addr)))
 }
 
 func runCaptureDiff(args []string, stderr io.Writer) int {
@@ -379,6 +383,36 @@ func runCaptureDiff(args []string, stderr io.Writer) int {
 	if _, err := diff.Capture(args[0], args[1]); err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: capture-diff: %v\n", err)
 		return 1
+	}
+	return 0
+}
+
+// runMCP starts the MCP stdio server, proxying tool calls to the broker.
+func runMCP(stderr io.Writer) int {
+	root, err := codex.RepoRoot("")
+	if err != nil {
+		fmt.Fprintf(stderr, "codex-dispatch mcp: %v\n", err)
+		return 2
+	}
+	addrPath := codex.BrokerAddrPath(root)
+	if err := codex.EnsureBrokerRunning(addrPath, root); err != nil {
+		fmt.Fprintf(stderr, "codex-dispatch mcp: %v\n", err)
+		return 3
+	}
+	addr, err := os.ReadFile(addrPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "codex-dispatch mcp: %v\n", err)
+		return 3
+	}
+	srv, err := mcp.NewServer(strings.TrimSpace(string(addr)))
+	if err != nil {
+		fmt.Fprintf(stderr, "codex-dispatch mcp: %v\n", err)
+		return 4
+	}
+	defer srv.Close()
+	if err := srv.Serve(context.Background()); err != nil && err != context.Canceled {
+		fmt.Fprintf(stderr, "codex-dispatch mcp: %v\n", err)
+		return 5
 	}
 	return 0
 }

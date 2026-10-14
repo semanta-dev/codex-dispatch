@@ -83,7 +83,9 @@ var (
 
 // Table is the in-memory task table. Safe for concurrent use.
 type Table struct {
-	mu sync.Mutex
+	storeErr error    // fail admission closed after any persistence failure
+	store    *os.Root // durable status archive; event rings remain in memory
+	mu       sync.Mutex
 
 	concurrencyCap int // max concurrent running tasks
 	ringSize       int // events kept per task
@@ -196,10 +198,11 @@ func (t *Table) DetachedRunner() *DetachedRunner {
 }
 
 type taskRecord struct {
-	task    Task
-	events  []Event // ring buffer; sized at ringSize
-	head    int     // next write index in events
-	totalEv int     // total events appended (including evicted)
+	persistenceFailed bool // pin terminal evidence while disk has stale state
+	task              Task
+	events            []Event // ring buffer; sized at ringSize
+	head              int     // next write index in events
+	totalEv           int     // total events appended (including evicted)
 }
 
 // NewTable constructs a Table with the given concurrency cap and per-task
@@ -320,7 +323,27 @@ func (t *Table) HasNonTerminal() bool {
 // advisory — the semaphore, not this snapshot, is what actually gates the run —
 // but it now predicts the semaphore's decision rather than a divergent count.)
 func (t *Table) Start(sessionID string, params TaskParams) (string, bool) {
+	id, queued, _ := t.start(sessionID, params, 0)
+	return id, queued
+}
+
+// Admit is the production entrypoint. Check capacity under the same lock as
+// insertion, before allocating the task's event ring or launching a goroutine.
+func (t *Table) Admit(sessionID string, params TaskParams) (string, bool, error) {
+	return t.start(sessionID, params, 64)
+}
+
+func (t *Table) start(sessionID string, params TaskParams, limit int) (string, bool, error) {
 	t.mu.Lock()
+	if t.storeErr != nil {
+		err := t.storeErr
+		t.mu.Unlock()
+		return "", false, err
+	}
+	if limit > 0 && t.nonTerminalCountLocked() >= limit {
+		t.mu.Unlock()
+		return "", false, &RPCError{Code: -32008, Message: "broker capacity reached (64 queued/running tasks); retry after a task finishes"}
+	}
 	// Drop terminal tasks that have aged out before adding a new one so the
 	// table stays bounded across a long-lived broker's lifetime.
 	t.evictTerminalLocked()
@@ -336,12 +359,16 @@ func (t *Table) Start(sessionID string, params TaskParams) (string, bool) {
 		},
 		events: make([]Event, t.ringSize),
 	}
+	if err := t.persistLocked(rec); err != nil {
+		t.mu.Unlock()
+		return "", false, err
+	}
 	t.tasks[id] = rec
 	t.order = append(t.order, id)
 	fn := t.onActivity
 	t.mu.Unlock()
 	t.noteActivity(fn)
-	return id, queued
+	return id, queued, nil
 }
 
 // ConcurrencyCap returns the configured maximum number of running tasks.
@@ -367,10 +394,11 @@ func (t *Table) MarkRunning(id string) error {
 	}
 	rec.task.State = StateRunning
 	rec.task.StartedAt = t.nowUTC()
+	persistErr := t.persistLocked(rec)
 	fn := t.onActivity
 	t.mu.Unlock()
 	t.noteActivity(fn)
-	return nil
+	return persistErr
 }
 
 // MarkDone transitions running → done with the codex exit code and session id.
@@ -391,11 +419,12 @@ func (t *Table) MarkDone(id string, exitCode int, codexSession string, fellBack 
 	rec.task.ExitCode = exitCode
 	rec.task.CodexSession = codexSession
 	rec.task.FellBackToFresh = fellBack
+	persistErr := t.persistLocked(rec)
 	t.evictTerminalLocked()
 	fn := t.onActivity
 	t.mu.Unlock()
 	t.noteActivity(fn)
-	return nil
+	return persistErr
 }
 
 // MarkErrored transitions running → errored with a broker-side error. The
@@ -418,11 +447,12 @@ func (t *Table) MarkErrored(id string, exitCode int, reason string) error {
 	rec.task.FinishedAt = t.nowUTC()
 	rec.task.ExitCode = exitCode
 	rec.task.ErrorMessage = reason
+	persistErr := t.persistLocked(rec)
 	t.evictTerminalLocked()
 	fn := t.onActivity
 	t.mu.Unlock()
 	t.noteActivity(fn)
-	return nil
+	return persistErr
 }
 
 // Cancel transitions a non-terminal task to cancelled. From queued it goes
@@ -442,11 +472,13 @@ func (t *Table) Cancel(id string) error {
 	}
 	rec.task.State = StateCancelled
 	rec.task.FinishedAt = t.nowUTC()
+	rec.task.ExitCode = 64
+	persistErr := t.persistLocked(rec)
 	t.evictTerminalLocked()
 	fn := t.onActivity
 	t.mu.Unlock()
 	t.noteActivity(fn)
-	return nil
+	return persistErr
 }
 
 // MarkCancelled records a terminal cancelled state with an exit code, used by
@@ -455,6 +487,9 @@ func (t *Table) Cancel(id string) error {
 // terminal (e.g. a concurrent task.cancel already moved it to cancelled), so
 // the drain can call it unconditionally after interrupting the turn.
 func (t *Table) MarkCancelled(id string, exitCode int) error {
+	if exitCode == 0 {
+		exitCode = 64
+	}
 	t.mu.Lock()
 	rec, ok := t.tasks[id]
 	if !ok {
@@ -468,11 +503,12 @@ func (t *Table) MarkCancelled(id string, exitCode int) error {
 	rec.task.State = StateCancelled
 	rec.task.FinishedAt = t.nowUTC()
 	rec.task.ExitCode = exitCode
+	persistErr := t.persistLocked(rec)
 	t.evictTerminalLocked()
 	fn := t.onActivity
 	t.mu.Unlock()
 	t.noteActivity(fn)
-	return nil
+	return persistErr
 }
 
 // Status returns a snapshot of the task.
@@ -481,7 +517,7 @@ func (t *Table) Status(id string) (Task, error) {
 	defer t.mu.Unlock()
 	rec, ok := t.tasks[id]
 	if !ok {
-		return Task{}, ErrTaskNotFound
+		return t.readStoredLocked(id)
 	}
 	task := rec.task
 	task.EventCount = rec.totalEv
@@ -603,18 +639,13 @@ func (t *Table) Events(id string, sinceSeq int64) ([]Event, error) {
 
 	// Collect events in chronological order from the ring.
 	// sinceSeq is inclusive: return events with Seq >= sinceSeq.
-	out := make([]Event, 0, int64(rec.totalEv)-sinceSeq+1)
+	count := int64(rec.totalEv) - sinceSeq + 1
+	out := make([]Event, count)
 	// Walk backwards from head looking for events with Seq >= sinceSeq.
-	for i := 0; i < len(rec.events); i++ {
+	for i := 0; i < int(count); i++ {
 		idx := (rec.head - 1 - i + len(rec.events)) % len(rec.events)
 		ev := rec.events[idx]
-		if ev.Seq == 0 {
-			break // empty slot; nothing more
-		}
-		if ev.Seq < sinceSeq {
-			break
-		}
-		out = append([]Event{ev}, out...)
+		out[int(count)-1-i] = ev
 	}
 	return out, nil
 }
@@ -665,7 +696,7 @@ func (t *Table) evictTerminalLocked() {
 	if t.terminalTTL > 0 {
 		cutoff := t.nowUTC().Add(-t.terminalTTL)
 		for id, rec := range t.tasks {
-			if rec.task.State.IsTerminal() && !rec.task.FinishedAt.IsZero() && rec.task.FinishedAt.Before(cutoff) {
+			if !rec.persistenceFailed && rec.task.State.IsTerminal() && !rec.task.FinishedAt.IsZero() && rec.task.FinishedAt.Before(cutoff) {
 				delete(t.tasks, id)
 			}
 		}
@@ -688,7 +719,7 @@ func (t *Table) evictTerminalLocked() {
 			if !ok {
 				continue
 			}
-			if rec.task.State.IsTerminal() {
+			if !rec.persistenceFailed && rec.task.State.IsTerminal() {
 				delete(t.tasks, id)
 				toDrop--
 			}
@@ -756,6 +787,7 @@ func (t *Table) DeregisterSession(sessionID string, cancelQueued bool) []string 
 		if rec.task.State == StateQueued {
 			rec.task.State = StateCancelled
 			rec.task.FinishedAt = t.nowUTC()
+			rec.task.ExitCode = 64
 			cancelled = append(cancelled, id)
 		}
 	}

@@ -1,5 +1,5 @@
 ---
-description: Run a GraphRAG Codex plan with single-tree parallel packet dispatch and AgentHub coordination.
+description: Run a GraphRAG Codex plan with serialized packet dispatch and AgentHub coordination.
 argument-hint: '<plan-path> [--jobs N] [--isolation none|worktree]'
 allowed-tools: [Bash]
 ---
@@ -17,12 +17,11 @@ Run the packetized GraphRAG plan through the local orchestrator:
 
 By default the runner executes every packet in the single working tree on the
 current feature branch (`--isolation none`). It never creates git worktrees in
-this mode. Concurrency safety comes from a deterministic, pre-flight
-allowed-file overlap partition plus per-file locks: two packets that write the
-same file are never placed in the same wave, and disjoint packets in a wave
-dispatch and verify in parallel up to `--jobs N`. This local partition is the
-**safety mechanism** and works with no extra session state. Pass
-`--isolation worktree` to opt into the git-worktree fallback (see below).
+this mode. A global checkout lock serializes dispatch, fan-in, verification, and
+scope audit in both modes. `--jobs` controls wave scheduling, not simultaneous
+verified execution. Keep the lock until isolated execution has a separately
+verified fan-in and mutation-coordination contract. Use `--isolation worktree`
+for dispatch isolation; parent verification still serializes.
 
 ## Coordination layer (AgentHub, when available)
 

@@ -8,29 +8,28 @@ packets never share a wave), execute each packet, and write a crash-durable,
 machine-readable execution ledger for review, ingestion, and benchmarking.
 
 Isolation modes (`--isolation`):
-  none (default): dispatch each packet directly via scripts/dispatch-codex.sh in
-    the parent working tree; no git worktrees are created. The overlap partition
-    keeps co-writing packets out of the same wave, and a per-file lock registry
-    (FileLockRegistry) serializes only packets that claim a shared file, so
-    disjoint packets within a wave dispatch and verify in parallel up to
-    `--jobs N`. A verification command that reads files a packet does not claim
-    (e.g. `go build ./...`) can still see a concurrent peer's in-flight edits to
-    those unclaimed files; use `--jobs 1` or `--isolation worktree` when a
-    packet's verification needs a fully quiescent tree.
-  worktree: route each packet through scripts/graphrag-worktree-dispatch.sh for
-    git-worktree isolation (the opt-in fallback).
+  none (default): dispatch in the parent working tree.
+  worktree: dispatch in an isolated Git worktree, then fan in allowed files.
+Both modes serialize dispatch through verification and final scope audit because
+verification runs in the parent checkout. Separate runner processes and external
+editors must still coordinate; this mutex does not isolate the OS filesystem.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import argparse
 import concurrent.futures
 import json
+import hashlib
+import stat
 import os
 import pathlib
 import re
 import signal
 import subprocess
+import sys
+import shutil
 import tempfile
 import threading
 import time
@@ -38,27 +37,54 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+ACTIVE_PROCESSES: set[subprocess.Popen] = set()
+PROCESS_LOCK = threading.RLock()
+CANCEL_REQUESTED = threading.Event()
+PLAN_DEADLINE = float("inf")
+
+
+def stop_process_tree(proc: subprocess.Popen) -> None:
+    spec = importlib.util.spec_from_file_location("execution_policy", pathlib.Path(__file__).with_name("execution_policy.py"))
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    policy.kill_tree(proc)
+
+
+def cancel_processes() -> None:
+    with PROCESS_LOCK:
+        CANCEL_REQUESTED.set()
+        processes = list(ACTIVE_PROCESSES)
+    for proc in processes:
+        stop_process_tree(proc)
+
+
+def run_process(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    with PROCESS_LOCK:
+        if CANCEL_REQUESTED.is_set():
+            return subprocess.CompletedProcess(argv, 130, "", "")
+        owned_argv = [sys.executable, '-I', str(pathlib.Path(__file__).with_name('owned_process.py')), str(os.getpid()), *argv] if sys.platform == 'linux' else argv
+        proc = subprocess.Popen(owned_argv, **kwargs, **options)
+        ACTIVE_PROCESSES.add(proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=max(.01, min(1800, PLAN_DEADLINE - time.monotonic())))
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        stop_process_tree(proc)
+        return subprocess.CompletedProcess(argv, 124, "", "plan deadline exceeded")
+    finally:
+        if proc.poll() is None:
+            stop_process_tree(proc)
+        with PROCESS_LOCK:
+            ACTIVE_PROCESSES.discard(proc)
+
+
 class FileLockRegistry:
-    """Per-file mutexes so disjoint single-tree packets dispatch in parallel.
+    """Deterministic lock registry for packet mutation regions.
 
-    In `--isolation none` mode a packet holds a lock on each implementation
-    path it claims across its whole dispatch+verification region, so a packet
-    never writes (or verifies) against another packet's half-applied edits to a
-    *shared* file. The overlap partition already keeps co-writing packets out of
-    the same wave, so packets that DO share a wave claim disjoint paths and thus
-    acquire disjoint lock sets — they run fully in parallel, honoring `--jobs N`.
-
-    Locks are always acquired in sorted path order to preclude deadlock, and
-    they key on the path string a packet claims (the same strings the overlap
-    partition compares), so the lock set and the partition agree by construction.
-
-    Note: this guards files a packet *claims*. A verification command that reads
-    files outside the claimed set (e.g. `go build ./...`) can still observe a
-    concurrent peer's in-flight edits to those unclaimed files; that residual is
-    inherent to running N dispatches in one working tree and is the same class of
-    cross-talk the overlap partition does not attempt to model for unclaimed
-    paths. A packet whose verification needs a fully quiescent tree should run
-    with `--jobs 1` or `--isolation worktree`.
+    Both isolation modes currently acquire the global parent-checkout key.
+    Wave partitioning preserves dependency/overlap order; workers do not perform
+    simultaneous dispatch and verification in the shared checkout.
     """
 
     def __init__(self) -> None:
@@ -118,6 +144,20 @@ class Packet:
     verification: str
     progress_record: str
     dependencies: list[str] = field(default_factory=list)
+
+
+def bash_executable() -> str:
+    if os.name != "nt":
+        return "bash"
+    # Windows CreateProcess searches System32 before PATH for bare bash,
+    # selecting the WSL launcher even when running inside Git Bash.
+    cygpath = shutil.which("cygpath")
+    if not cygpath:
+        raise OSError("Git Bash is required for native Windows shell execution")
+    shell = pathlib.Path(cygpath).with_name("bash.exe")
+    if not shell.is_file():
+        raise OSError("Git Bash executable not found beside cygpath")
+    return str(shell)
 
 
 def normalize_section(name: str) -> str:
@@ -227,14 +267,92 @@ def require_packet_contract(packet: Packet) -> list[str]:
             errors.append(f"{packet.heading}: missing {section}")
     if packet.progress_record and packet.progress_record not in packet.allowed_files:
         errors.append(f"{packet.heading}: progress record is not listed in Allowed files")
+    for path in packet.allowed_files + packet.input_files:
+        if not safe_path(path):
+            errors.append(f"{packet.heading}: unsafe path {path!r}")
     return errors
 
 
+def safe_path(path: str) -> bool:
+    return isinstance(path, str) and bool(path) and not pathlib.PureWindowsPath(path).drive and "\\" not in path and not path.startswith("/") and all(
+        part not in ("", ".", "..", ".git", ".codex-dispatch") for part in path.split("/")
+    )
+
+
+def fingerprint(path: pathlib.Path) -> str | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        data = os.fsencode(os.readlink(path))
+    elif stat.S_ISREG(info.st_mode):
+        data = path.read_bytes()
+    else:
+        raise ValueError(f"cannot audit special file/submodule: {path}")
+    return hashlib.sha256(str(info.st_mode).encode() + b"\0" + data).hexdigest()
+
+
+def tree_state(repo: pathlib.Path, out: pathlib.Path) -> dict[str, str]:
+    paths = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=repo)
+    result = {}
+    for raw in paths.split(b"\0"):
+        if not raw:
+            continue
+        name = os.fsdecode(raw)
+        path = repo / name
+        if name.startswith(".codex-dispatch/") or path == out or out in path.parents:
+            continue
+        value = fingerprint(path)
+        if value is not None:
+            result[name] = value
+    return result
+
+
+def changed_paths(before: dict, after: dict) -> list[str]:
+    return sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+
+
+def evidence_path(repo: pathlib.Path, packet: Packet) -> pathlib.Path:
+    key = hashlib.sha256(packet.body.encode()).hexdigest()
+    return repo / ".codex-dispatch" / "accepted" / (key + ".json")
+
+
 def is_done(repo: pathlib.Path, packet: Packet) -> bool:
-    if not packet.progress_record:
+    try:
+        evidence = json.loads(evidence_path(repo, packet).read_text())
+        return (evidence.get("version") == 2 and evidence.get("accepted") is True
+                and evidence.get("verification_state") == "passed"
+                and "Status: done" in (repo / packet.progress_record).read_text().splitlines()
+                and evidence.get("files") == {p: fingerprint(repo / p) for p in packet.allowed_files + packet.input_files})
+    except (OSError, ValueError):
         return False
-    path = repo / packet.progress_record
-    return path.exists() and "Status: done" in path.read_text(errors="ignore")
+
+
+def evaluate_evidence(wrapper_rc: int, result: Any, changed: list[str],
+                      dispatch_changed: list[str], allowed: list[str], verification: Any) -> dict[str, Any]:
+    reason = ""
+    valid = (isinstance(result, dict) and type(result.get("exit_code")) is int
+             and result["exit_code"] == 0 and isinstance(result.get("files_changed"), list)
+             and all(safe_path(p) for p in result["files_changed"]))
+    observed = set(changed) | set(dispatch_changed)
+    scope_ok = not (observed - set(allowed))
+    verified = verification is not None and verification["exit_code"] == 0
+    if wrapper_rc != 0:
+        reason = "dispatch wrapper failed"
+    elif not valid:
+        reason = "missing, invalid, or failed dispatch result"
+    elif set(result["files_changed"]) != set(dispatch_changed):
+        reason = "dispatch result does not match observed edits"
+    elif not scope_ok:
+        reason = "out-of-scope edits: " + ", ".join(sorted(observed - set(allowed)))
+    elif not changed:
+        reason = "no repository edits observed"
+    elif not verified:
+        reason = "verification failed" if verification is not None else "verification skipped"
+    return {"accepted": not reason, "reason": reason,
+            "scope_state": "passed" if scope_ok else "failed",
+            "verification_state": "passed" if verified else ("failed" if verification is not None else "skipped")}
 
 
 def is_progress_path(path: str) -> bool:
@@ -316,23 +434,17 @@ Do not commit, branch, push, revert, stash, or mutate git history."""
 
 
 def run_shell(command: str, repo: pathlib.Path) -> dict[str, Any]:
-    started = time.monotonic()
-    proc = subprocess.run(
-        command,
-        cwd=repo,
-        shell=True,
-        executable="/bin/bash",
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    return {
-        "command": command,
-        "exit_code": proc.returncode,
-        "wall_s": round(time.monotonic() - started, 3),
-        "stdout": proc.stdout[-4000:],
-        "stderr": proc.stderr[-4000:],
-    }
+    spec = importlib.util.spec_from_file_location("execution_policy", pathlib.Path(__file__).with_name("execution_policy.py"))
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    logs = repo / ".codex-dispatch/verification" / str(time.monotonic_ns())
+    logs.mkdir(parents=True, exist_ok=True)
+    timeout = min(120, int(os.environ.get("CODEX_DISPATCH_TIMEOUT_MS", "120000")) / 1000)
+    result = policy.verify(command, repo, repo, logs / "stdout", logs / "stderr", min(timeout, PLAN_DEADLINE-time.monotonic()), cancel=CANCEL_REQUESTED, admission_lock=PROCESS_LOCK)
+    if result.get("mutations"):
+        result["exit_code"] = 66
+        result["failure_kind"] = "verification-mutated-source"
+    return result
 
 
 def write_progress_record(
@@ -345,6 +457,8 @@ def write_progress_record(
     if not packet.progress_record:
         return
     progress = repo / packet.progress_record
+    if not progress.resolve().is_relative_to(repo.resolve()):
+        raise ValueError("progress path escapes repository")
     progress.parent.mkdir(parents=True, exist_ok=True)
     changed = result_json.get("files_changed") or []
     # packet.heading is the captured markdown line ("## Packet 001: One"); strip
@@ -390,6 +504,13 @@ def write_progress_record(
     progress.write_text("\n".join(lines))
 
 
+def script_command(path: str) -> list[str]:
+    # Native Python on Windows cannot directly execute POSIX shebang scripts.
+    if pathlib.Path(path).suffix == ".sh":
+        return [bash_executable(), pathlib.Path(path).as_posix()]
+    return [path]
+
+
 def dispatch_packet(
     packet: Packet,
     args: argparse.Namespace,
@@ -417,8 +538,8 @@ def dispatch_packet(
             allowed_path = allowed.name
         try:
             with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
-                proc = subprocess.run(
-                    [str(dispatch), "--allowed-file", allowed_path],
+                proc = run_process(
+                    [*script_command(str(dispatch)), "--allowed-file", allowed_path],
                     cwd=repo,
                     env=env,
                     text=True,
@@ -434,8 +555,8 @@ def dispatch_packet(
         # result.json file into the dir it prints on its last stdout line.
         dispatch_cmd = args.dispatch_command or str(plugin_root / "scripts" / "dispatch-codex.sh")
         with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
-            proc = subprocess.run(
-                [dispatch_cmd],
+            proc = run_process(
+                script_command(dispatch_cmd),
                 cwd=repo,
                 env=env,
                 text=True,
@@ -453,13 +574,18 @@ def dispatch_packet(
 
     result_json: dict[str, Any] = {}
     if run_dir:
+        # Git Bash emits POSIX paths while native Python consumes drive paths.
+        if os.name == "nt" and run_dir.startswith("/"):
+            run_dir = subprocess.check_output(["cygpath", "-w", run_dir], text=True).strip()
         result_path = pathlib.Path(run_dir) / result_name
         if result_path.exists():
             try:
                 result_json = json.loads(result_path.read_text(errors="ignore"))
             except json.JSONDecodeError:
-                result_json = {}
+                result_json = {"artifact_error": "malformed result JSON"}
 
+    if not result_json:
+        result_json = {"artifact_error": "missing or empty result JSON"}
     return proc, stdout_text, stderr_text, run_dir, result_json, allowed_for_dispatch
 
 
@@ -468,28 +594,42 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
     stdout_path = pathlib.Path(args.out) / f"packet-{packet.number}.stdout"
     stderr_path = pathlib.Path(args.out) / f"packet-{packet.number}.stderr"
 
-    # In single-tree mode, hold a per-file lock on each implementation path this
-    # packet claims across its whole dispatch AND verification region, so a
-    # packet never writes/verifies against another packet's half-applied edits to
-    # a shared file. Because the overlap partition keeps co-writing packets out
-    # of the same wave, wave peers claim disjoint paths -> disjoint lock sets ->
-    # they dispatch in parallel (honoring --jobs N). In worktree mode each packet
-    # is isolated by its own worktree, so no locking is needed.
-    held: list[threading.Lock] = []
-    if args.isolation != "worktree":
-        held = SINGLE_TREE_LOCKS.acquire(overlap_paths(packet))
+    # Dispatch, parent fan-in, verification and audit share one checkout. Keep
+    # that entire region quiescent across this runner's workers in both modes.
+    held = SINGLE_TREE_LOCKS.acquire(["__parent_checkout__"])
     try:
+        evidence_path(repo, packet).unlink(missing_ok=True)
+        before = tree_state(repo, pathlib.Path(args.out).resolve())
         proc, stdout_text, stderr_text, run_dir, result_json, allowed_for_dispatch = dispatch_packet(
             packet, args, repo, plugin_root
         )
-
+        dispatched = tree_state(repo, pathlib.Path(args.out).resolve())
         verification = None
-        if proc.returncode == 0 and packet.verification and not args.no_verify:
+        if (proc.returncode == 0 and isinstance(result_json, dict)
+                and type(result_json.get("exit_code")) is int and result_json["exit_code"] == 0
+                and packet.verification and not args.no_verify):
             verification = run_shell(packet.verification, repo)
-
-        verification_ok = verification is None or verification["exit_code"] == 0
-        if proc.returncode == 0 and verification_ok and args.write_progress:
-            write_progress_record(repo, packet, result_json, verification, args.isolation)
+        after = tree_state(repo, pathlib.Path(args.out).resolve())
+        evidence = evaluate_evidence(proc.returncode, result_json, changed_paths(before, after),
+                                     changed_paths(before, dispatched), allowed_for_dispatch, verification)
+        # Commit completion before cancellation, or reject it after cancellation;
+        # never race a signal into a post-interruption progress write.
+        with PROCESS_LOCK:
+            if CANCEL_REQUESTED.is_set():
+                evidence.update(accepted=False, reason="interrupted")
+            if evidence["accepted"] and args.write_progress:
+                write_progress_record(repo, packet, result_json, verification, args.isolation)
+            progress = repo / packet.progress_record
+            progress_valid = bool(packet.progress_record) and progress.is_file() and "Status: done" in progress.read_text().splitlines()
+            if evidence["accepted"] and not progress_valid:
+                evidence.update(accepted=False, reason="missing or invalid completion record")
+            if evidence["accepted"]:
+                evidence.update(version=2, files={p: fingerprint(repo / p) for p in packet.allowed_files + packet.input_files})
+                target = evidence_path(repo, packet)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temp = target.with_suffix(".tmp")
+                temp.write_text(json.dumps(evidence))
+                os.replace(temp, target)
     finally:
         FileLockRegistry.release(held)
 
@@ -498,12 +638,9 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
         progress = repo / packet.progress_record
         if progress.exists():
             content = progress.read_text(errors="ignore")
-            progress_state = "done" if "Status: done" in content else "invalid"
+            progress_state = "done" if "Status: done" in content.splitlines() else "invalid"
 
-    passed = proc.returncode == 0
-    if verification is not None:
-        passed = passed and verification["exit_code"] == 0
-    passed = passed and progress_state == "done"
+    passed = evidence["accepted"] and progress_state == "done"
 
     return {
         "packet": packet.number,
@@ -517,11 +654,12 @@ def run_packet(packet: Packet, args: argparse.Namespace, repo: pathlib.Path, plu
         "stdout_tail": stdout_text[-4000:],
         "stderr_tail": stderr_text[-4000:],
         "dispatch_result": result_json,
+        "evidence": evidence,
         "verification": verification,
         "progress_record": packet.progress_record,
         "progress_state": progress_state,
         "dispatch_allowed_files": allowed_for_dispatch,
-        "changed_files": result_json.get("files_changed", []),
+        "changed_files": result_json.get("files_changed", []) if isinstance(result_json, dict) else [],
     }
 
 
@@ -599,9 +737,14 @@ def select_wave(
 
 
 def run_plan(args: argparse.Namespace) -> int:
+    global PLAN_DEADLINE
+    PLAN_DEADLINE = time.monotonic() + getattr(args, "timeout", 1800)
+    CANCEL_REQUESTED.clear()
     repo = pathlib.Path(args.repo).resolve()
     plugin_root = pathlib.Path(__file__).resolve().parents[1]
     out = pathlib.Path(args.out).resolve()
+    if out == repo or out in repo.parents:
+        raise ValueError("runner output must not contain the repository")
     out.mkdir(parents=True, exist_ok=True)
     ledger_path = out / "ledger.json"
     if args.shared_broker and not args.shared_broker_addr:
@@ -616,6 +759,37 @@ def run_plan(args: argparse.Namespace) -> int:
         print(json.dumps(ledger, indent=2))
         return 2
     errors = [error for packet in packets for error in require_packet_contract(packet)]
+    identities = {}
+    for packet in packets:
+        if packet.number in identities:
+            errors.append(f"duplicate normalized packet ID {packet.number}: {identities[packet.number]} and {packet.heading}")
+        identities[packet.number] = packet.heading
+    graph = {packet.number: packet.dependencies for packet in packets}
+    visiting, visited = set(), set()
+    def visit(number):
+        if number in visiting:
+            errors.append(f"cyclic packet dependency at {number}")
+            return
+        if number in visited:
+            return
+        visiting.add(number)
+        for dependency in graph[number]:
+            if dependency not in graph:
+                errors.append(f"{identities[number]}: unknown dependency {dependency}")
+            else:
+                visit(dependency)
+        visiting.remove(number)
+        visited.add(number)
+    for number in graph:
+        visit(number)
+    for packet in packets:
+        for name in packet.allowed_files:
+            target = repo / name
+            if target.resolve() == out or out in target.resolve().parents:
+                errors.append(f"{packet.heading}: allowed path overlaps runner output: {name}")
+            if not target.resolve().is_relative_to(repo):
+                errors.append(f"{packet.heading}: allowed path escapes repository: {name}")
+
     if errors:
         ledger = {"status": "fail", "errors": errors, "packets": []}
         ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
@@ -626,7 +800,7 @@ def run_plan(args: argparse.Namespace) -> int:
     conflicts = overlap_conflicts(packets)
     remaining = {packet.number for packet in packets if args.rerun or not is_done(repo, packet)}
     completed = {packet.number for packet in packets if packet.number not in remaining}
-    records: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = [{"packet": number, "status": "cached", "reason": "valid acceptance evidence"} for number in sorted(completed)]
     started = time.monotonic()
 
     def build_ledger(status: str, interrupted: bool = False) -> dict[str, Any]:
@@ -642,7 +816,8 @@ def run_plan(args: argparse.Namespace) -> int:
             ],
             "wall_s": round(time.monotonic() - started, 3),
             "packets_total": len(packets),
-            "packets_run": len([record for record in records if "packet" in record]),
+            "packets_run": len([record for record in records if "packet" in record and record.get("status") != "cached"]),
+            "packets_cached": sum(r.get("status") == "cached" for r in records),
             "packets_passed": len([record for record in records if record.get("status") == "pass"]),
             "records": records,
         }
@@ -668,12 +843,18 @@ def run_plan(args: argparse.Namespace) -> int:
         # as KeyboardInterrupt so in-flight waves unwind; the except-block flush
         # below then rewrites the ledger with any records that fanned in during
         # the unwind, and that later atomic write is the authoritative one.
+        if interrupted["flag"]:
+            return  # A repeated interrupt must not interrupt child cleanup.
         interrupted["flag"] = True
         flush_ledger("interrupted", interrupted=True)
+        cancel_processes()
         raise KeyboardInterrupt
 
     previous_handlers = {}
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)  # Windows console group interruption
+    for sig in signals:
         try:
             previous_handlers[sig] = signal.signal(sig, handle_signal)
         except (ValueError, OSError):
@@ -726,7 +907,7 @@ def run_plan(args: argparse.Namespace) -> int:
                 except (ValueError, OSError):
                     pass
 
-    status = "pass" if all(record.get("status") == "pass" for record in records) and not remaining else "fail"
+    status = "pass" if all(record.get("status") in {"pass", "cached"} for record in records) and not remaining else "fail"
     # Build the final ledger exactly once: flush_ledger writes it and returns
     # the same dict we print, so the on-disk ledger.json and stdout never
     # diverge (e.g. on wall_s).
@@ -744,23 +925,11 @@ def main() -> int:
         "--jobs",
         type=int,
         default=4,
-        help="max packets to dispatch concurrently per wave. In --isolation none, "
-        "packets that claim disjoint files run in parallel up to this many; "
-        "packets that share a claimed file are serialized by per-file locks "
-        "(see --isolation help)",
+        help="max scheduled packets per wave; parent mutation and verification are serialized",
     )
     parser.add_argument(
-        "--isolation",
-        choices=("none", "worktree"),
-        default="none",
-        help="none (default): dispatch each packet directly in the parent tree "
-        "(single-tree, no git worktrees). Co-writing packets are kept out of the "
-        "same wave by the overlap partition and serialized by per-file locks, so "
-        "disjoint packets dispatch/verify in parallel up to --jobs; a "
-        "verification that reads unclaimed files may still see a peer's in-flight "
-        "edits (use --jobs 1 or --isolation worktree for a quiescent tree). "
-        "worktree: route through graphrag-worktree-dispatch.sh for git-worktree "
-        "isolation",
+        "--isolation", choices=("none", "worktree"), default="none",
+        help="none: direct parent dispatch; worktree: isolated dispatch with fan-in. Both serialize parent verification.",
     )
     parser.add_argument(
         "--dispatch-command",
@@ -793,7 +962,10 @@ def main() -> int:
     )
     parser.set_defaults(write_progress=True)
     parser.add_argument("--rerun", action="store_true")
+    parser.add_argument("--timeout", type=float, default=1800, help="total plan wall budget in seconds")
     args = parser.parse_args()
+    if not 0 < args.timeout <= 86400:
+        parser.error("--timeout must be positive and at most 86400")
     if args.jobs < 1:
         parser.error("--jobs must be >= 1")
     return run_plan(args)

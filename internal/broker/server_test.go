@@ -2,12 +2,10 @@ package broker
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,7 +122,12 @@ func waitAddrFile(t *testing.T, path string) string {
 }
 
 func httpPost(addr string, body []byte) ([]byte, error) {
-	resp, err := http.Post("http://"+addr+"/rpc", "application/json", bytes.NewReader(body))
+	client, err := Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	resp, err := client.post(context.Background(), body)
 	if err != nil {
 		return nil, err
 	}

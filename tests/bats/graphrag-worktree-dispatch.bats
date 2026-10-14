@@ -187,8 +187,21 @@ EOF
     "$SCRIPT" > second.out 2> second.err
   ) &
   pid2=$!
-  wait "$pid1"
-  wait "$pid2"
+  rc1=0
+  rc2=0
+  wait "$pid1" || rc1=$?
+  wait "$pid2" || rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    printf 'parallel dispatch exit codes: first=%s second=%s\n' "$rc1" "$rc2" >&2
+    cat first.err second.err >&2
+    for diagnostic in .codex-dispatch/graphrag-worktree-runs/*/worktree-add-*.err; do
+      [ -f "$diagnostic" ] || continue
+      printf '%s\n' "$diagnostic" >&2
+      cat "$diagnostic" >&2
+    done
+  fi
+  [ "$rc1" -eq 0 ]
+  [ "$rc2" -eq 0 ]
 
   [ "$(cat docs/one.md)" = "one" ]
   [ "$(cat docs/two.md)" = "two" ]
@@ -331,4 +344,51 @@ EOF
   [ "$(cat docs/packet.md)" = "reclaimed" ]
   # Reclaim must happen well under the 60s blocking window.
   [ "$(( end - start ))" -lt 30 ]
+}
+
+@test "late WIP conflict changes no earlier file and preserves rejected worktree" {
+  printf 'base a\n' > a.txt
+  printf 'base b\n' > b.txt
+  git add a.txt b.txt
+  git commit -qm files
+  printf 'operator WIP\n' > b.txt
+  export GRAPHRAG_DISPATCH_COMMAND="$FAKE_DISPATCH"
+  export GRAPHRAG_ALLOWED_FILES=$'a.txt\nb.txt'
+  export FAKE_WRITE_PATH=a.txt FAKE_EXTRA_PATH=b.txt
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [ "$(cat a.txt)" = 'base a' ]
+  [ "$(cat b.txt)" = 'operator WIP' ]
+  retained="$(find .codex-dispatch/graphrag-worktrees -name a.txt -print -quit)"
+  [ -n "$retained" ]
+  [ "$(cat "$retained")" = written ]
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [ -f "$retained" ]
+}
+
+@test "symlink ancestor cannot redirect fan-in outside parent" {
+  outside="$(mktemp -d)"
+  ln -s "$outside" redirected
+  export GRAPHRAG_DISPATCH_COMMAND="$FAKE_DISPATCH"
+  export GRAPHRAG_ALLOWED_FILES='redirected/new.txt'
+  export FAKE_WRITE_PATH='redirected/new.txt'
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [ ! -e "$outside/new.txt" ]
+  rmdir "$outside"
+}
+
+@test "clean CRLF checkout is not mistaken for parent WIP" {
+  git config core.autocrlf true
+  printf 'base\r\n' > file.txt
+  git add file.txt
+  git commit -qm crlf
+  [ -z "$(git status --porcelain -- file.txt)" ]
+  export GRAPHRAG_DISPATCH_COMMAND="$FAKE_DISPATCH"
+  export GRAPHRAG_ALLOWED_FILES='file.txt'
+  export FAKE_WRITE_PATH='file.txt'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat file.txt)" = written ]
 }

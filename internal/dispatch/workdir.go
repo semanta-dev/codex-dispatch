@@ -34,7 +34,7 @@ func DeriveModuleDir(repoRoot, filesCSV string) string {
 	if len(files) == 0 {
 		return ""
 	}
-	absRoot, err := filepath.Abs(repoRoot)
+	absRoot, err := filepath.Abs(filepath.Clean(repoRoot))
 	if err != nil {
 		return ""
 	}

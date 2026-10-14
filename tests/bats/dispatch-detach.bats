@@ -33,7 +33,7 @@ setup() {
 teardown() {
   cd /
   if [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ]; then
-    kill "$(cat "$TEST_REPO/.codex-dispatch/broker.pid")" 2>/dev/null || true
+    cddx_stop_process "$(cat "$TEST_REPO/.codex-dispatch/broker.pid")" 2>/dev/null || true
   fi
   rm -rf "$TEST_REPO" "$FAKE_BIN" 2>/dev/null || true
   export PATH="$ORIG_PATH"
@@ -153,4 +153,55 @@ _detach_wait_terminal() {
   grep -qF '"method":"turn/completed"' "$TEST_REPO/detach-run/stdout.log"
   # ...and unlike a synchronous dispatch it must NOT produce a result.json.
   [ ! -f "$TEST_REPO/detach-run/result.json" ]
+}
+
+@test "detached terminal status survives a broker process restart" {
+  export FAKE_APPSERVER_SESSION="thread-detach-restart"
+  task_id="$("$DISPATCH" --detach)"
+  _detach_wait_terminal "$task_id"
+  [ "$(echo "$output" | jq -r '.state')" = done ]
+  archive="$TEST_REPO/.codex-dispatch/tasks/$task_id.json"
+  [ -f "$archive" ]
+  broker_pid="$(cat "$TEST_REPO/.codex-dispatch/broker.pid")"
+  cddx_stop_process "$broker_pid"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Forced Windows shutdown leaves a stale PID; restart must recover it.
+      powershell.exe -NoProfile -Command "if (Get-Process -Id $broker_pid -ErrorAction SilentlyContinue) { Wait-Process -Id $broker_pid }; exit 0"
+      ;;
+    *)
+      for _ in $(seq 1 100); do
+        [ -f "$TEST_REPO/.codex-dispatch/broker.pid" ] || break
+        sleep 0.05
+      done
+      [ ! -f "$TEST_REPO/.codex-dispatch/broker.pid" ]
+      ;;
+  esac
+  run "$DISPATCH" --status "$task_id"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.state')" = done ]
+  [ "$(echo "$output" | jq -r '.session_id')" = thread-detach-restart ]
+  [ "$(echo "$output" | jq -r '.exit_code')" -eq 0 ]
+}
+
+@test "supervised cold detach hands broker ownership off after a valid task id" {
+  [ ! -f "$TEST_REPO/.codex-dispatch/broker.pid" ]
+  run python3 - "$REPO_ROOT" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('hook', root / 'scripts/hooks/codex-expansion.py')
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+print(hook.invoke([hook.EVIDENCE.bash_executable(), str(root / 'scripts/dispatch-codex.sh'), '--detach'],
+                  dict(os.environ), Path.cwd(), background_handoff=True), end='')
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^t_[a-f0-9]+$ ]]
+  local task_id="$output"
+  _detach_wait_terminal "$task_id"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state":"done"'* ]] || [[ "$output" == *'"state": "done"'* ]]
 }

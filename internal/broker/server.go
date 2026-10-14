@@ -3,10 +3,14 @@ package broker
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +26,7 @@ type Handler func(ctx context.Context, params json.RawMessage) (any, error)
 type Server struct {
 	listenAddr string
 	addrFile   string
+	token      string
 
 	mu       sync.RWMutex
 	handlers map[string]Handler
@@ -50,12 +55,22 @@ func (s *Server) HandleFunc(method string, h Handler) {
 // Serve listens on localhost TCP and serves newline-delimited JSON-RPC over
 // HTTP POST /rpc until ctx is cancelled.
 func (s *Server) Serve(ctx context.Context) error {
+	var secret [32]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return fmt.Errorf("generate broker credential: %w", err)
+	}
+	s.token = hex.EncodeToString(secret[:])
 	listener, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	if addr, ok := listener.Addr().(*net.TCPAddr); !ok || !addr.IP.IsLoopback() {
+		listener.Close()
+		return fmt.Errorf("broker requires a loopback listener")
+	}
 	if s.addrFile != "" {
-		addr := listener.Addr().String()
+		record, _ := json.Marshal(endpointRecord{Version: 2, Address: listener.Addr().String(), Token: s.token})
+		addr := string(record)
 		if err := writeAddrFileAtomic(s.addrFile, addr); err != nil {
 			listener.Close()
 			return fmt.Errorf("write broker addr: %w", err)
@@ -86,17 +101,13 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func writeAddrFileAtomic(path, addr string) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	tmp, err := createCredentialTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write([]byte(addr + "\n")); err != nil {
 		_ = tmp.Close()
 		return err
@@ -119,6 +130,28 @@ func removeAddrFileIfCurrent(path, addr string) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || r.URL.Path != "/rpc" {
 		http.NotFound(w, r)
+		return
+	}
+	// Authenticate before reading the body or invoking any side effects.
+	if s.token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" {
+		http.Error(w, "browser requests are not supported", http.StatusForbidden)
+		return
+	}
+	if r.Host != r.URL.Host && r.URL.Host != "" {
+		http.Error(w, "invalid host", http.StatusForbidden)
+		return
+	}
+	host, _, err := net.SplitHostPort(r.Host)
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+		http.Error(w, "invalid host", http.StatusForbidden)
+		return
+	}
+	if contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || contentType != "application/json" {
+		http.Error(w, "application/json required", http.StatusUnsupportedMediaType)
 		return
 	}
 	defer r.Body.Close()

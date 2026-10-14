@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -17,21 +16,42 @@ import (
 // Returns a release function that removes the PID file. Safe to call
 // multiple times; subsequent calls are no-ops.
 func AcquirePIDFile(path string) (func(), error) {
-	if existing, ok := readPIDFile(path); ok {
-		if existing != os.Getpid() && processLive(existing) {
+	pidBytes := []byte(strconv.Itoa(os.Getpid()))
+	for {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			var werr error
+			if _, werr = file.Write(pidBytes); werr == nil {
+				werr = file.Close()
+			} else {
+				_ = file.Close()
+			}
+			if werr != nil {
+				_ = os.Remove(path)
+				return nil, fmt.Errorf("write PID file %s: %w", path, werr)
+			}
+			break
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("create PID file %s: %w", path, err)
+		}
+		existing, ok := readPIDFile(path)
+		if ok && existing != os.Getpid() && processLive(existing) {
 			return nil, fmt.Errorf("broker already running (PID %d) — PID file at %s", existing, path)
 		}
-	}
-
-	pidBytes := []byte(strconv.Itoa(os.Getpid()))
-	if err := os.WriteFile(path, pidBytes, 0o600); err != nil {
-		return nil, fmt.Errorf("write PID file %s: %w", path, err)
+		// A malformed or stale file cannot represent a live broker. Remove it
+		// and retry exclusive creation; a concurrent broker will win the race.
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove stale PID file %s: %w", path, err)
+		}
 	}
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			_ = os.Remove(path)
+			if current, ok := readPIDFile(path); ok && current == os.Getpid() {
+				_ = os.Remove(path)
+			}
 		})
 	}, nil
 }
@@ -46,29 +66,6 @@ func readPIDFile(path string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// processLive returns true when a process with the given PID exists.
-// Uses signal 0 (no-op probe) per POSIX.
-// EPERM means the process exists but we lack permission — still live.
-// ESRCH means the process does not exist — dead.
-func processLive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	// EPERM: process exists, we can't signal it (e.g. different user/namespace).
-	if errno, ok := err.(syscall.Errno); ok && errno == syscall.EPERM {
-		return true
-	}
-	return false
 }
 
 // IdleTimer fires onFire after `timeout` of inactivity. Reset extends the

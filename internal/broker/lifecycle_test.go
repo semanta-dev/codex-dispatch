@@ -34,9 +34,8 @@ func TestAcquirePIDFileWritesOwnPID(t *testing.T) {
 func TestAcquirePIDFileRefusesWhenAnotherLiveBroker(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "broker.pid")
-	// PID 1 (init/systemd) is always alive on Unix. Use it to simulate
-	// "another live broker" (a PID different from ours but provably alive).
-	if err := os.WriteFile(path, []byte("1"), 0o600); err != nil {
+	// The test runner parent is a live, distinct PID on all native platforms.
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getppid())), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	_, err := AcquirePIDFile(path)

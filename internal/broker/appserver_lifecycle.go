@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/semanta-dev/codex-dispatch/internal/authority"
 	"github.com/semanta-dev/codex-dispatch/internal/codex/appserver"
 )
 
@@ -22,6 +23,18 @@ var defaultAppServerFactory AppServerFactory = func(cwd string) *appserver.AppSe
 	}
 	env := os.Environ()
 	args := []string{"app-server"}
+	// Deny the dispatched Codex process read/write access to the private
+	// authority store. The probe in docs/authority-sandbox-probe-2026-09-13.md
+	// demonstrated that without an explicit deny, Codex's default :workspace
+	// profile can read the controller's baseline snapshots. This deny is
+	// additive to the thread-level confinedWorkspaceConfig() which already pins
+	// writable_roots=[], network=false, and tmpdir exclusions.
+	if authBase, authErr := authority.BaseDir(); authErr == nil && authBase != "" {
+		args = append(args,
+			"-c", fmt.Sprintf("permissions.dispatch_authority_deny={extends=\\\":workspace\\\",filesystem={%s=\\\"deny\\\"}}", authBase),
+			"-c", "default_permissions=\\\"dispatch_authority_deny\\\"",
+		)
+	}
 	// Disable codex's configured MCP servers for dispatch runs by default, so a
 	// dispatched codex focuses on the repository and cannot be derailed by a slow
 	// or failing MCP / web tool (a local MCP endpoint, playwright, semanta, etc.)

@@ -68,6 +68,10 @@ require_tools() {
     err "sha256sum or shasum required (provided by coreutils on Linux; preinstalled on macOS)"
     exit 6
   fi
+  command -v python3 >/dev/null 2>&1 || {
+    err "python3 required for safe archive extraction"
+    exit 6
+  }
 }
 
 sha256_of() {
@@ -88,18 +92,15 @@ fetch_url() {
 }
 
 # --- locking ----------------------------------------------------------------
-with_lock() {
+# Subshells scope EXIT/signal traps and descriptors to their resource owner.
+# A nested download must never replace the lock owner's cleanup trap.
+with_lock() (
   local lockdir="$1"; shift
   mkdir -p "$lockdir"
   if command -v flock >/dev/null 2>&1; then
     local fd
     exec {fd}>"$lockdir/.lock"
     flock "$fd"
-    "$@"
-    local rc=$?
-    trap - RETURN
-    eval "exec $fd>&-"
-    return "$rc"
   else
     local sentinel="$lockdir/.lock.d"
     local tries=0
@@ -108,40 +109,37 @@ with_lock() {
       [ "$tries" -gt 60 ] && { err "lock contention on $lockdir"; return 1; }
       sleep 1
     done
-    trap 'rmdir "$sentinel" 2>/dev/null || true' RETURN EXIT
-    "$@"
+    trap 'rmdir "$sentinel" 2>/dev/null || true' EXIT
   fi
-}
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  "$@"
+)
 
 # extract_archive pulls the binary out of a downloaded archive into cache. It
 # tries the single-member fast path first, then the whole archive, honoring the
 # platform archive format (zip on Windows, tar.gz elsewhere).
 extract_archive() {
   local archive="$1" cache="$2" bin="$3"
-  if [ "$ARCHIVE_EXT" = "zip" ]; then
-    unzip -o -q "$archive" "$bin" -d "$cache" 2>/dev/null && return 0
-    unzip -o -q "$archive" -d "$cache" 2>/dev/null && return 0
-    return 1
-  fi
-  tar -xzf "$archive" -C "$cache" "$bin" 2>/dev/null && return 0
-  tar -xzf "$archive" -C "$cache" 2>/dev/null && return 0
-  return 1
+  python3 "$script_dir/safe_extract.py" "$archive" "$cache" "$bin"
 }
 
-download_and_verify() {
+download_and_verify() (
   local version="$1" platform="$2" cache="$3"
+  # Another launcher may have installed while this process waited for the lock.
+  [ -x "$cache/$BIN_NAME" ] && return 0
   local base="${CODEX_DISPATCH_RELEASE_URL:-https://github.com/semanta-dev/codex-dispatch/releases/download/v${version}}"
   local archive="codex-dispatch_${platform}.${ARCHIVE_EXT}"
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  trap 'rm -rf "$tmp"; rm -f "$cache/.${BIN_NAME}.install"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   if ! fetch_url "${base}/${archive}" "$tmp/$archive"; then
     err "cannot reach ${base} to download v${version} binary."
-    err "For offline install, download ${archive} and"
-    err "checksums.txt from"
-    err "https://github.com/semanta-dev/codex-dispatch/releases/tag/v${version}"
-    err "and place them in ${cache}/manual/, then re-run."
+    err "For an unreleased checkout, build ./cmd/codex-dispatch and set CODEX_DISPATCH_BIN to its absolute path."
+    err "For offline install, verify and extract the matching release, then place ${BIN_NAME} in ${cache}/manual/."
     exit 7
   fi
   if ! fetch_url "${base}/checksums.txt" "$tmp/checksums.txt"; then
@@ -150,7 +148,7 @@ download_and_verify() {
   fi
 
   local expected actual
-  expected="$(grep " ${archive}\$" "$tmp/checksums.txt" | awk '{print $1}')"
+  expected="$(awk -v name="$archive" '$2 == name {print $1}' "$tmp/checksums.txt")"
   if [ -z "$expected" ]; then
     err "checksums.txt has no entry for ${archive}"; exit 5
   fi
@@ -159,21 +157,28 @@ download_and_verify() {
     err "checksum mismatch: expected $expected got $actual"; exit 5
   fi
 
-  mkdir -p "$cache"
-  if ! extract_archive "$tmp/$archive" "$cache" "$BIN_NAME"; then
+  mkdir -p "$tmp/extracted"
+  if ! extract_archive "$tmp/$archive" "$tmp/extracted" "$BIN_NAME"; then
     err "archive is corrupt"
     exit 8
   fi
-  if [ ! -x "$cache/$BIN_NAME" ]; then
+  if [ ! -f "$tmp/extracted/$BIN_NAME" ] || [ -L "$tmp/extracted/$BIN_NAME" ]; then
     err "extracted archive missing $BIN_NAME binary"
     exit 8
   fi
-  chmod +x "$cache/$BIN_NAME" 2>/dev/null || true
-}
+  chmod +x "$tmp/extracted/$BIN_NAME"
+  # Stage on the cache filesystem so publication is an atomic rename.
+  cp "$tmp/extracted/$BIN_NAME" "$cache/.${BIN_NAME}.install"
+  mv -f "$cache/.${BIN_NAME}.install" "$cache/$BIN_NAME"
+)
 
 # --- main -------------------------------------------------------------------
 
-if [ -n "${CODEX_DISPATCH_BIN:-}" ] && [ -x "${CODEX_DISPATCH_BIN}" ]; then
+if [ -n "${CODEX_DISPATCH_BIN:-}" ]; then
+  if [ ! -x "$CODEX_DISPATCH_BIN" ]; then
+    err "CODEX_DISPATCH_BIN is not executable: $CODEX_DISPATCH_BIN"
+    exit 6
+  fi
   exec "${CODEX_DISPATCH_BIN}" dispatch "$@"
 fi
 
@@ -190,7 +195,6 @@ else
   ARCHIVE_EXT="tar.gz"
 fi
 
-require_tools
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-dispatch/v${PINNED_VERSION}"
 BIN="${CACHE_DIR}/${BIN_NAME}"
 
@@ -199,6 +203,7 @@ if [ ! -x "$BIN" ]; then
     cp "${CACHE_DIR}/manual/${BIN_NAME}" "$BIN"
     chmod +x "$BIN" 2>/dev/null || true
   else
+    require_tools
     with_lock "$CACHE_DIR" download_and_verify "$PINNED_VERSION" "$PLATFORM" "$CACHE_DIR"
   fi
 fi

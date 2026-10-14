@@ -2,13 +2,17 @@ package dispatch
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/semanta-dev/codex-dispatch/internal/artifact"
 	"time"
 
 	"github.com/semanta-dev/codex-dispatch/internal/codex"
@@ -73,6 +77,8 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		return 1, err
 	}
 
+	promptEnv := env // Input paths stay relative to the invocation directory.
+
 	// Monorepo auto-scoping: when the caller did not pin a working directory
 	// (WorkDir is still the repo root), derive the go.work/module subdir that
 	// owns the seeded files and run codex there. Files spanning multiple modules
@@ -89,6 +95,12 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		return 1, err
 	}
 
+	artifactRoot, err := os.OpenRoot(resultDir)
+	if err != nil {
+		return 1, err
+	}
+	defer artifactRoot.Close()
+
 	// --- baseline capture --------------------------------------------------
 	headSha, err := gitOutput(env.WorkDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -96,42 +108,37 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		return 1, err
 	}
 	headSha = strings.TrimSpace(headSha)
-	if err := os.WriteFile(filepath.Join(resultDir, "baseline-head.txt"), []byte(headSha+"\n"), 0o644); err != nil {
+	if err := artifact.WriteAtomic(resultDir, "baseline-head.txt", []byte(headSha+"\n"), 0o600); err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1, err
 	}
-	prePatch, _ := gitOutput(env.WorkDir, "-c", "core.quotepath=false", "diff", "HEAD")
-	_ = os.WriteFile(filepath.Join(resultDir, "baseline-pre.patch"), []byte(prePatch), 0o644)
-	// Record pre-existing dirty/untracked paths and a content signature for each
-	// so post-run attribution excludes pre-existing WIP while still attributing
-	// a codex edit to an already-dirty file. internal/diff owns this format.
-	//
-	// A baseline-capture failure is surfaced (not swallowed): without the
-	// baseline, post-run attribution cannot distinguish codex's edits from
-	// pre-existing WIP, so proceeding would silently mis-attribute files_changed
-	// and the exit_code=4 gate. Fail the run with a clear message instead.
-	if err := diff.CaptureBaseline(env.WorkDir, resultDir); err != nil {
+	baseline, err := diff.CaptureBaselineHandle(env.WorkDir, resultDir)
+	if err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: capture-baseline failed (diff attribution would be unreliable): %v\n", err)
 		return 1, fmt.Errorf("capture-baseline failed: %w", err)
 	}
 
+	prePatch, err := baseline.PreexistingPatch()
+	if err != nil {
+		return 1, fmt.Errorf("baseline WIP patch: %w", err)
+	}
+	if err := artifact.WriteAtomic(resultDir, "baseline-pre.patch", prePatch, 0600); err != nil {
+		return 1, err
+	}
+
 	// --- prompt build ------------------------------------------------------
-	promptText, err := buildPromptForEnv(env, stderr)
+	promptText, err := buildPromptForEnv(promptEnv, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1, err
 	}
-	if err := os.WriteFile(filepath.Join(resultDir, "prompt.txt"), []byte(promptText), 0o644); err != nil {
+	if err := artifact.WriteAtomic(resultDir, "prompt.txt", []byte(promptText), 0o600); err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
 		return 1, err
 	}
 
 	// --- codex invocation --------------------------------------------------
 	logPath := filepath.Join(resultDir, "stdout.log")
-	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
-		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
-		return 1, err
-	}
 	var (
 		run             codex.Run
 		fellBackToFresh bool
@@ -139,7 +146,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	if env.SessionID != "" {
 		run, err = codex.Resume(ctx, env.SessionID, promptText, env.Sandbox, env.Model, logPath, env.WorkDir)
 		if err != nil {
-			if rc, cerr, handled := handleCanceled(ctx, err, resultDir, logPath, stderr); handled {
+			if rc, cerr, handled := handleCanceled(ctx, err, resultDir, logPath, stderr, baseline); handled {
 				return rc, cerr
 			}
 			fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
@@ -153,7 +160,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	} else {
 		run, err = codex.Fresh(ctx, promptText, env.Sandbox, env.Model, logPath, env.WorkDir)
 		if err != nil {
-			if rc, cerr, handled := handleCanceled(ctx, err, resultDir, logPath, stderr); handled {
+			if rc, cerr, handled := handleCanceled(ctx, err, resultDir, logPath, stderr, baseline); handled {
 				return rc, cerr
 			}
 			fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
@@ -168,18 +175,28 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	// typed response instead.
 	sessionID := run.SessionID
 
-	// --- diff capture (warn on error, do not fail dispatch) ----------------
-	stats, err := diff.CaptureInDir(env.WorkDir, headSha, resultDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "codex-dispatch: warning: capture-diff failed: %v\n", err)
-		stats = diff.Stats{FilesChanged: []string{}}
-	}
-
+	// --- diff capture: missing evidence is a failure, never a no-op --------
+	stats, captureErr := baseline.Capture(env.WorkDir, headSha, resultDir)
 	exitCode := run.ExitCode
 	errorMessage := run.ErrorMessage
+	diffPath := filepath.Join(resultDir, "diff.patch")
+	if captureErr != nil {
+		exitCode = 1
+		errorMessage = fmt.Sprintf("capture-diff failed: %v", captureErr)
+		fmt.Fprintf(stderr, "codex-dispatch: %s\n", errorMessage)
+		_ = os.Remove(diffPath) // Never leave a partial or stale patch consumable.
+		diffPath = ""
+	}
+
 	if exitCode == 0 && len(stats.FilesChanged) == 0 {
 		exitCode = 4
 		errorMessage = "codex completed without meaningful repository edits"
+	}
+
+	// Record the authoritative directory after automatic module selection.
+	// Consumers must not infer verification scope from the original request.
+	if err := writeEffectiveWorkdir(artifactRoot, env.WorkDir); err != nil {
+		return 1, fmt.Errorf("record effective workdir: %w", err)
 	}
 
 	// --- result.json -------------------------------------------------------
@@ -190,10 +207,13 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 		LinesAdded:              stats.LinesAdded,
 		LinesRemoved:            stats.LinesRemoved,
 		StdoutPath:              logPath,
-		DiffPath:                filepath.Join(resultDir, "diff.patch"),
+		DiffPath:                diffPath,
 		FellBackToFresh:         fellBackToFresh,
 		ErrorMessage:            errorMessage,
 		FilesChangedOutsideSeed: filesOutsideSeed(env.Files, stats.FilesChanged),
+	}
+	if err := baseline.SealResult(res); err != nil {
+		return 1, fmt.Errorf("seal terminal result: %w", err)
 	}
 	if err := result.Write(resultDir, res); err != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", err)
@@ -201,7 +221,29 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 	}
 
 	fmt.Fprintln(stdout, resultDir)
+	if captureErr != nil {
+		return 1, fmt.Errorf("capture-diff failed: %w", captureErr)
+	}
 	return 0, nil
+}
+
+// writeEffectiveWorkdir atomically replaces the leaf rather than following a
+// symlink planted by a completed turn in its artifact directory.
+func writeEffectiveWorkdir(root *os.Root, cwd string) error {
+	name := ".effective-workdir-" + rand.Text()
+	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(name)
+	if _, err := file.WriteString(cwd + "\n"); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return root.Rename(name, "effective-workdir.txt")
 }
 
 // handleCanceled detects a dispatch aborted by ctx cancellation or a timeout.
@@ -210,7 +252,7 @@ func runWithContext(ctx context.Context, env Env, stdout, stderr io.Writer) (int
 // the failed-turn convention) rather than surfacing a bare broker/read error.
 // handled is false when ctx is still live (the error was unrelated to ctx), in
 // which case the caller falls back to its normal error handling.
-func handleCanceled(ctx context.Context, runErr error, resultDir, logPath string, stderr io.Writer) (rc int, err error, handled bool) {
+func handleCanceled(ctx context.Context, runErr error, resultDir, logPath string, stderr io.Writer, baseline *diff.Baseline) (rc int, err error, handled bool) {
 	if ctx.Err() == nil {
 		return 0, nil, false
 	}
@@ -229,6 +271,9 @@ func handleCanceled(ctx context.Context, runErr error, resultDir, logPath string
 		DiffPath:     "",
 		ErrorMessage: msg,
 	}
+	if werr := baseline.SealResult(res); werr != nil {
+		return 1, werr, true
+	}
 	if werr := result.Write(resultDir, res); werr != nil {
 		fmt.Fprintf(stderr, "codex-dispatch: %v\n", werr)
 		return 1, werr, true
@@ -237,18 +282,77 @@ func handleCanceled(ctx context.Context, runErr error, resultDir, logPath string
 }
 
 func ensureResultDir(env Env, repoRoot string) (string, error) {
-	if env.ResultDir != "" {
-		if err := os.MkdirAll(env.ResultDir, 0o755); err != nil {
+	// Resolve the requested path before validating it. A symlink anywhere in the
+	// chain must not silently redirect artifacts, but platform-owned ancestor
+	// links are legitimate: on macOS every temporary directory is reached
+	// through /var -> /private/var. Validating the resolved location keeps the
+	// redirect protection while remaining usable on that platform.
+	resolve := func(path string) (string, error) {
+		path, err := filepath.Abs(path)
+		if err != nil {
 			return "", err
 		}
-		return env.ResultDir, nil
+		var pending []string
+		current := path
+		for {
+			resolved, evalErr := filepath.EvalSymlinks(current)
+			if evalErr == nil {
+				for i := len(pending) - 1; i >= 0; i-- {
+					resolved = filepath.Join(resolved, pending[i])
+				}
+				return resolved, nil
+			}
+			if !os.IsNotExist(evalErr) {
+				return "", evalErr
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				return "", fmt.Errorf("cannot resolve result directory %s", path)
+			}
+			pending = append(pending, filepath.Base(current))
+			current = parent
+		}
+	}
+	makePrivate := func(path string) (string, error) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		// The caller's own leaf must never be a link: silently redirecting the
+		// export destination is worse than refusing it. Ancestor links are
+		// resolved below because platforms own some of them.
+		if info, lerr := os.Lstat(abs); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("result directory is a symlink: %s", abs)
+		}
+		path, err = resolve(abs)
+		if err != nil {
+			return "", err
+		}
+		_, statErr := os.Lstat(path)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return "", err
+		}
+		// The final component must be a real directory, never a link. Reject a
+		// leaf that a child replaced between resolution and creation.
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("result directory is not a regular directory")
+		}
+		if os.IsNotExist(statErr) {
+			if err := os.Chmod(path, 0o700); err != nil {
+				return "", err
+			}
+		} else if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+			return "", fmt.Errorf("existing result directory is not private (mode %o)", info.Mode().Perm())
+		}
+		return path, nil
+	}
+	if env.ResultDir != "" {
+		return makePrivate(env.ResultDir)
 	}
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	dir := filepath.Join(repoRoot, ".codex-dispatch", "runs", fmt.Sprintf("%s-%d", ts, os.Getpid()))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return makePrivate(dir)
 }
 
 // PrepareRunDir creates the result directory (honoring env.ResultDir when set,
@@ -265,9 +369,6 @@ func PrepareRunDir(env Env) (resultDir, logPath string, err error) {
 		return "", "", err
 	}
 	logPath = filepath.Join(resultDir, "stdout.log")
-	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
-		return "", "", err
-	}
 	return resultDir, logPath, nil
 }
 
@@ -279,6 +380,9 @@ func buildPromptForEnv(env Env, stderr io.Writer) (string, error) {
 		Feedback:    env.Feedback,
 	}
 	convPath := env.ConventionsFile
+	if convPath != "" && !filepath.IsAbs(convPath) {
+		convPath = filepath.Join(env.WorkDir, convPath)
+	}
 	if convPath == "" {
 		convPath = prompt.DetectConventions(env.WorkDir)
 	}

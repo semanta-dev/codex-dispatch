@@ -1,0 +1,81 @@
+name: Windows sandbox feasibility probe
+
+on:
+  push:
+    branches: [codex/plan-a-repair]
+    paths:
+      - tests/native/windows-sandbox-probe/**
+      - scripts/windows_file_policy.py
+      - scripts/windows_evidence.py
+      - scripts/review-evidence.py
+      - tests/python/test_windows_file_policy.py
+      - tests/python/test_windows_evidence.py
+      - .github/workflows/windows-sandbox-probe.yml
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Build native isolated experiment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force probe-evidence | Out-Null
+          go env GOOS GOARCH | Out-File probe-evidence/build-platform.txt
+          [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture | Out-File probe-evidence/os-architecture.txt
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | Format-List | Out-File probe-evidence/os-version.txt
+          go build -o "$env:RUNNER_TEMP\windows-sandbox-probe.exe" ./tests/native/windows-sandbox-probe 2>&1 | Tee-Object -FilePath probe-evidence/build.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git rev-parse HEAD | Out-File probe-evidence/candidate.txt
+          go env GOOS GOARCH | Out-File probe-evidence/build-platform.txt
+          Get-FileHash "$env:RUNNER_TEMP\windows-sandbox-probe.exe" -Algorithm SHA256 | Format-List | Out-File probe-evidence/probe-hash.txt
+      - name: Run fixed harmless LPAC controls only
+        shell: pwsh
+        run: |
+          $gitExe = (Get-Command git.exe).Source
+          $gitRoot = Split-Path (Split-Path $gitExe)
+          "Git executable: $gitExe`nCopied runtime source: $gitRoot" | Out-File probe-evidence/runtime.txt
+          & "$env:RUNNER_TEMP\windows-sandbox-probe.exe" --git-root "$gitRoot" --out probe-evidence/windows-sandbox-probe.json *> probe-evidence/probe-console.txt
+          exit $LASTEXITCODE
+      - name: Native evidence HANDLE boundary tests
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force probe-evidence | Out-Null
+          python -c "import platform,sys; print(sys.version); print(platform.machine()); assert platform.machine().lower() == ('arm64' if '$env:RUNNER_ARCH' == 'ARM64' else 'amd64')" *> probe-evidence/python-platform.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests/python -p test_windows_file_policy.py -v *> probe-evidence/file-boundaries.txt
+          exit $LASTEXITCODE
+      - name: Native bounded evidence integration tests
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force probe-evidence | Out-Null
+          python -m unittest discover -s tests/python -p test_windows_evidence.py -v *> probe-evidence/evidence-integration.txt
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-sandbox-probe-${{ matrix.os }}
+          path: probe-evidence/
+          if-no-files-found: error

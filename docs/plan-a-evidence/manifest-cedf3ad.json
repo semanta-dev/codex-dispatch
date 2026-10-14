@@ -1,0 +1,404 @@
+{
+  "version": 1,
+  "candidate": "cedf3ad11df58150f1387cb0be5e8f2d5c77d7ce",
+  "model": "gpt-5.5",
+  "reasoning": "medium",
+  "router_model": "claude-haiku-4-5-20251001",
+  "review_route": "api-hook-command",
+  "router_thinking_tokens": 0,
+  "structured_output_retries": 0,
+  "review_system_sha256": "30e1ca93646bb0dfabace6ac74e62380ebbfe7cf4f5cf4a01befe2cf753eef3f",
+  "entrypoint": "scripts/codex-reviewed.py",
+  "review_tools": [
+    "review_result"
+  ],
+  "review_endpoint": "http://localhost:44444/v1/messages",
+  "sandbox": "workspace-write",
+  "approval": "never",
+  "mcp": "none",
+  "max_attempts": 3,
+  "timeout_seconds_per_trial": 600,
+  "retry_policy": "direct explicit resume with deterministic oracle feedback; plugin advertised inline review loop",
+  "pricing_basis": "published-rate-equivalent USD; CTO approved before measurement; not actual proxy billing",
+  "rates_per_million": {
+    "input": 5,
+    "cached_input": 0.5,
+    "output": 30
+  },
+  "pricing_source": "https://developers.openai.com/api/docs/pricing.md retrieved 2026-09-09",
+  "review_rates_per_million": {
+    "input": 1,
+    "cached_input": 0.1,
+    "output": 5
+  },
+  "review_pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing.md retrieved 2026-09-09",
+  "instrumentation": "before/after raw state outside product timing; actual verification/retries inside",
+  "codex_config_sha256": "190b1d4cc469b323d9afba08d2e56c696e8eadcf71e46884e6c05871628bda39",
+  "versions": {
+    "codex": "codex-cli 0.154.0",
+    "claude": "2.1.266 (Claude Code)",
+    "git": "git version 2.43.0"
+  },
+  "entries": [
+    {
+      "name": "C01-1-direct",
+      "case": "C01",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C01-1-plugin",
+      "case": "C01",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C02-1-plugin",
+      "case": "C02",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C02-1-direct",
+      "case": "C02",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C03-1-direct",
+      "case": "C03",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C03-1-plugin",
+      "case": "C03",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C04-1-plugin",
+      "case": "C04",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C04-1-direct",
+      "case": "C04",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C05-1-direct",
+      "case": "C05",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C05-1-plugin",
+      "case": "C05",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C06-1-plugin",
+      "case": "C06",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C06-1-direct",
+      "case": "C06",
+      "arm": "direct",
+      "workdir": "service"
+    },
+    {
+      "name": "C01-2-plugin",
+      "case": "C01",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C01-2-direct",
+      "case": "C01",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C02-2-direct",
+      "case": "C02",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C02-2-plugin",
+      "case": "C02",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C03-2-plugin",
+      "case": "C03",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C03-2-direct",
+      "case": "C03",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C04-2-direct",
+      "case": "C04",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C04-2-plugin",
+      "case": "C04",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C05-2-plugin",
+      "case": "C05",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C05-2-direct",
+      "case": "C05",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C06-2-direct",
+      "case": "C06",
+      "arm": "direct",
+      "workdir": "service"
+    },
+    {
+      "name": "C06-2-plugin",
+      "case": "C06",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C01-3-direct",
+      "case": "C01",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C01-3-plugin",
+      "case": "C01",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C02-3-plugin",
+      "case": "C02",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C02-3-direct",
+      "case": "C02",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C03-3-direct",
+      "case": "C03",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C03-3-plugin",
+      "case": "C03",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C04-3-plugin",
+      "case": "C04",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C04-3-direct",
+      "case": "C04",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C05-3-direct",
+      "case": "C05",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C05-3-plugin",
+      "case": "C05",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C06-3-plugin",
+      "case": "C06",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C06-3-direct",
+      "case": "C06",
+      "arm": "direct",
+      "workdir": "service"
+    },
+    {
+      "name": "C01-4-plugin",
+      "case": "C01",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C01-4-direct",
+      "case": "C01",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C02-4-direct",
+      "case": "C02",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C02-4-plugin",
+      "case": "C02",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C03-4-plugin",
+      "case": "C03",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C03-4-direct",
+      "case": "C03",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C04-4-direct",
+      "case": "C04",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C04-4-plugin",
+      "case": "C04",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C05-4-plugin",
+      "case": "C05",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C05-4-direct",
+      "case": "C05",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C06-4-direct",
+      "case": "C06",
+      "arm": "direct",
+      "workdir": "service"
+    },
+    {
+      "name": "C06-4-plugin",
+      "case": "C06",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C01-5-direct",
+      "case": "C01",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C01-5-plugin",
+      "case": "C01",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C02-5-plugin",
+      "case": "C02",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C02-5-direct",
+      "case": "C02",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C03-5-direct",
+      "case": "C03",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C03-5-plugin",
+      "case": "C03",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C04-5-plugin",
+      "case": "C04",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C04-5-direct",
+      "case": "C04",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C05-5-direct",
+      "case": "C05",
+      "arm": "direct",
+      "workdir": "."
+    },
+    {
+      "name": "C05-5-plugin",
+      "case": "C05",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C06-5-plugin",
+      "case": "C06",
+      "arm": "plugin",
+      "workdir": "."
+    },
+    {
+      "name": "C06-5-direct",
+      "case": "C06",
+      "arm": "direct",
+      "workdir": "service"
+    }
+  ]
+}

@@ -99,12 +99,23 @@ func dispatchViaBroker(ctx context.Context, mode, prevSessionID, prompt, sandbox
 	if err != nil {
 		return Run{ExitCode: -1}, err
 	}
+	return fromBrokerResult(res), nil
+}
+
+func fromBrokerResult(res *broker.DispatchRunResult) Run {
+	code, message := res.ExitCode, res.ErrorMessage
+	if code == 0 && res.State != string(broker.StateDone) {
+		code = 64
+		if message == "" {
+			message = fmt.Sprintf("broker returned non-completed state %q with zero exit code", res.State)
+		}
+	}
 	return Run{
-		ExitCode:        res.ExitCode,
+		ExitCode:        code,
 		SessionID:       res.SessionID,
 		FellBackToFresh: res.FellBackToFresh,
-		ErrorMessage:    res.ErrorMessage,
-	}, nil
+		ErrorMessage:    message,
+	}
 }
 
 // threadCWD chooses the directory codex should use as its thread cwd. It is
@@ -128,6 +139,12 @@ func threadCWD(repoRoot, workDir string) string {
 	absWork, err := filepath.Abs(workDir)
 	if err != nil {
 		return repoRoot
+	}
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(absWork); err == nil {
+		absWork = resolved
 	}
 	rel, err := filepath.Rel(absRoot, absWork)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -212,8 +229,14 @@ func ResolveBrokerEndpoint() (string, string, error) {
 // EnsureBrokerRunning pings the broker; if unreachable, spawns one via
 // os.Executable() and polls for its address file to become reachable.
 func EnsureBrokerRunning(addrPath, repoRoot string) error {
-	if addr, err := readBrokerAddr(addrPath); err == nil && pingBroker(addr) == nil {
-		return nil
+	if addr, err := readBrokerAddr(addrPath); err == nil {
+		err = pingBroker(addr)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, broker.ErrUnauthenticatedEndpoint) {
+			return err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(addrPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir broker dir: %w", err)

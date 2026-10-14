@@ -142,6 +142,7 @@ func TestDispatchRunReassemblesOversizedTaskEventPayload(t *testing.T) {
 
 	table := NewTable(8, 2048)
 	state := &BrokerState{Table: table, CWD: repoDir}
+	t.Cleanup(func() { state.CloseAppServer(context.Background()) })
 
 	c1, c2 := net.Pipe()
 	defer c1.Close()

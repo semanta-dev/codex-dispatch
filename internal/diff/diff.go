@@ -11,15 +11,20 @@ package diff
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/semanta-dev/codex-dispatch/internal/artifact"
 )
 
 // Stats is the JSON shape written to result_dir/stats.json.
@@ -29,45 +34,25 @@ type Stats struct {
 	LinesRemoved int      `json:"lines_removed"`
 }
 
-// CaptureBaseline records, before codex runs, which paths are already dirty or
-// untracked in the working tree (so they can be excluded from attribution) and
-// a content signature (blob hash) for each (so a later edit to an already-dirty
-// file is still attributed, while a no-op is not). It writes
-// baseline-pre-files.txt (NUL-delimited paths) and baseline-pre-hashes.txt
-// (NUL-delimited path,hash pairs) under resultDir.
-//
-// It is best-effort: git enumeration errors are swallowed (a missing baseline
-// just means nothing is pre-excluded); only a resultDir write failure returns
-// an error.
+// CaptureBaseline saves a recoverable pre-run working-tree snapshot privately
+// and writes its exported descriptor to resultDir.
+// Any failure prevents dispatch because attribution would be unreliable.
 func CaptureBaseline(workdir, resultDir string) error {
+	_, err := CaptureBaselineHandle(workdir, resultDir)
+	return err
+}
+
+// CaptureBaselineHandle returns controller-held identity for the lifetime of a
+// dispatch. The model-written export is never used to choose capture targets.
+func CaptureBaselineHandle(workdir, resultDir string) (*Baseline, error) {
 	if resultDir == "" {
-		return fmt.Errorf("resultDir required")
+		return nil, fmt.Errorf("resultDir required")
 	}
 	repoRoot, err := gitTopLevel(workdir)
 	if err != nil {
-		// Not a usable git repo; write empty baselines so the post-run reader
-		// has well-defined inputs.
-		_ = writeNULList(filepath.Join(resultDir, "baseline-pre-files.txt"), nil)
-		_ = writeNULPairs(filepath.Join(resultDir, "baseline-pre-hashes.txt"), nil, nil)
-		return nil
+		return nil, err
 	}
-	resultRel, _ := relIfUnder(repoRoot, resultDir)
-
-	tracked, _ := listChangedNames(repoRoot, "", "HEAD", resultRel)
-	untracked, _ := listUntracked(repoRoot, "", resultRel)
-	pre := dedup(append(tracked, untracked...))
-
-	hashes := make(map[string]string, len(pre))
-	for _, f := range pre {
-		if h := hashFile(repoRoot, f); h != "" {
-			hashes[f] = h
-		}
-	}
-
-	if err := writeNULList(filepath.Join(resultDir, "baseline-pre-files.txt"), pre); err != nil {
-		return err
-	}
-	return writeNULPairs(filepath.Join(resultDir, "baseline-pre-hashes.txt"), pre, hashes)
+	return saveSnapshot(repoRoot, workdir, resultDir)
 }
 
 // Capture runs against the current working directory. CaptureInDir is the
@@ -82,7 +67,16 @@ func Capture(baselineHead, resultDir string) (Stats, error) {
 
 // CaptureInDir takes the repo's working directory as an explicit argument so
 // tests don't need to chdir.
+// CaptureTaskInDir requires the recoverable baseline created by CaptureBaseline.
+func CaptureTaskInDir(workdir, baselineHead, resultDir string) (Stats, error) {
+	return captureInDir(workdir, baselineHead, resultDir, true)
+}
+
 func CaptureInDir(workdir, baselineHead, resultDir string) (Stats, error) {
+	return captureInDir(workdir, baselineHead, resultDir, false)
+}
+
+func captureInDir(workdir, baselineHead, resultDir string, requireSnapshot bool) (Stats, error) {
 	if baselineHead == "" {
 		return Stats{}, fmt.Errorf("baselineHead required")
 	}
@@ -92,6 +86,15 @@ func CaptureInDir(workdir, baselineHead, resultDir string) (Stats, error) {
 
 	repoRoot, err := gitTopLevel(workdir)
 	if err != nil {
+		return Stats{}, err
+	}
+	if raw, err := readSnapshotExport(resultDir); err == nil {
+		var s snapshot
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return Stats{}, fmt.Errorf("invalid baseline snapshot: %w", err)
+		}
+		return captureSnapshot(repoRoot, baselineHead, resultDir, s)
+	} else if requireSnapshot || !os.IsNotExist(err) {
 		return Stats{}, err
 	}
 
@@ -197,15 +200,102 @@ func runGit(workdir string, args ...string) (string, error) {
 // runGitIndex runs git in workdir; when indexFile is non-empty the command is
 // pointed at it via GIT_INDEX_FILE so it never reads or writes the shared index.
 func runGitIndex(workdir, indexFile string, args ...string) (string, error) {
-	full := append([]string{"-c", "core.quotepath=false"}, args...)
-	cmd := exec.Command("git", full...)
-	cmd.Dir = workdir
-	if indexFile != "" {
-		cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+indexFile)
+	return runGitIndexObjects(workdir, indexFile, "", args...)
+}
+
+// gitCommand strips caller Git overrides; snapshot object writes have no
+// alternates so each captured tree is self-contained in the private store.
+func gitCommand(workdir, indexFile, objectDir string, args ...string) *exec.Cmd {
+	return gitCommandContext(context.Background(), workdir, indexFile, objectDir, args...)
+}
+
+// emptyConfigPath is a path Git can stat and read as an empty file. On Windows
+// os.DevNull is "NUL", a device some Git for Windows builds cannot stat when it
+// is supplied as a config or hooks path: they abort every command with
+// "unable to access 'NUL': Invalid argument". An empty regular file is
+// semantically identical to /dev/null for these settings and is portable.
+var emptyConfigPath = sync.OnceValue(func() string {
+	if runtime.GOOS != "windows" {
+		return os.DevNull
 	}
+	f, err := os.CreateTemp("", "codex-dispatch-empty-*.config")
+	if err != nil {
+		return os.DevNull // Fall back rather than failing the capture outright.
+	}
+	name := f.Name()
+	f.Close()
+	return name
+})
+
+func gitCommandContext(ctx context.Context, workdir, indexFile, objectDir string, args ...string) *exec.Cmd {
+	if objectDir != "" {
+		args = append([]string{"-c", "core.splitIndex=false"}, args...)
+	}
+	empty := emptyConfigPath()
+	full := append([]string{"--no-replace-objects", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + empty, "-c", "protocol.allow=never"}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.WaitDelay = time.Second
+	cmd.Dir = workdir
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GIT_") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	// GIT_CONFIG_NOSYSTEM also stops Git opening the system config path at all,
+	// which scripts/windows_evidence.py already sets and the Go path did not.
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM="+empty, "GIT_CONFIG_GLOBAL="+empty, "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+	if indexFile != "" {
+		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+indexFile)
+	}
+	if objectDir != "" {
+		cmd.Env = append(cmd.Env, "GIT_OBJECT_DIRECTORY="+objectDir, "GIT_ALTERNATE_OBJECT_DIRECTORIES=")
+	}
+	return cmd
+}
+
+// boundedGitOutput cancels the child as soon as either output stream overflows.
+// Returning a writer error alone could leave Git blocked on a full output pipe.
+type boundedGitOutput struct {
+	data     bytes.Buffer
+	limit    int
+	cancel   context.CancelFunc
+	overflow bool
+}
+
+func (b *boundedGitOutput) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.data.Len() {
+		b.overflow = true
+		b.cancel()
+		return 0, fmt.Errorf("git output exceeds quota")
+	}
+	return b.data.Write(p)
+}
+
+func runGitBounded(ctx context.Context, workdir, indexFile, objectDir, input string, limit int, args ...string) (string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := gitCommandContext(ctx, workdir, indexFile, objectDir, args...)
+	cmd.Stdin = strings.NewReader(input)
+	stdout := boundedGitOutput{limit: limit, cancel: cancel}
+	stderr := boundedGitOutput{limit: 64000, cancel: cancel}
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if stdout.overflow || stderr.overflow {
+		return "", fmt.Errorf("git output exceeds quota")
+	}
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("git capture budget: %w", ctx.Err())
+	}
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.data.String()))
+	}
+	return stdout.data.String(), nil
+}
+
+func runGitIndexObjects(workdir, indexFile, objectDir string, args ...string) (string, error) {
+	cmd := gitCommand(workdir, indexFile, objectDir, args...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
@@ -219,6 +309,11 @@ func runGitIndex(workdir, indexFile string, args ...string) (string, error) {
 func setupTempIndex(repoRoot, resultDir string) (string, func(), error) {
 	tmp := filepath.Join(resultDir, "index.tmp")
 	cleanup := func() { _ = os.Remove(tmp) }
+	// This run owns the temporary name; remove only a prior interrupted copy,
+	// then publish the replacement with O_EXCL so symlink substitutions fail.
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		return "", cleanup, err
+	}
 
 	gitDir, err := runGit(repoRoot, "rev-parse", "--absolute-git-dir")
 	if err != nil {
@@ -239,20 +334,25 @@ func setupTempIndex(repoRoot, resultDir string) (string, func(), error) {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	root, err := os.OpenRoot(filepath.Dir(src))
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	defer root.Close()
+	data, err := artifact.ReadRegularAt(root, filepath.Base(src), 512*1024*1024)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
 		return err
 	}
-	return out.Close()
+	_, err = out.Write(data)
+	closeErr := out.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 func gitAddIntentToAdd(workdir, indexFile string, paths []string) error {
@@ -264,7 +364,7 @@ func gitAddIntentToAdd(workdir, indexFile string, paths []string) error {
 // hashFile returns the git blob hash of the working-tree content at path, or ""
 // if the file is missing or git fails. hash-object does not consult the index.
 func hashFile(repoRoot, path string) string {
-	out, err := runGit(repoRoot, "hash-object", "--", path)
+	out, err := runGit(repoRoot, "hash-object", "--no-filters", "--", path)
 	if err != nil {
 		return ""
 	}
@@ -385,24 +485,45 @@ func listChangedNames(repoRoot, indexFile, baseline, resultRel string) ([]string
 	return files, nil
 }
 
-func writeDiffPatch(repoRoot, indexFile, baseline string, files []string, path string) error {
-	if len(files) == 0 {
-		return os.WriteFile(path, nil, 0o644)
-	}
-	args := append([]string{"diff", baseline, "--"}, files...)
-	out, err := runGitIndex(repoRoot, indexFile, args...)
+func writeDiffPatch(repoRoot, indexFile, baseline string, files []string, path string, after ...string) error {
+	return writeDiffPatchObjects(repoRoot, indexFile, "", baseline, files, path, after...)
+}
+
+func writeDiffPatchObjects(repoRoot, indexFile, objectDir, baseline string, files []string, path string, after ...string) error {
+	patch, err := diffPatchBytes(repoRoot, indexFile, objectDir, baseline, files, after...)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(out), 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), patch, 0600)
 }
 
-func numstat(repoRoot, indexFile, baseline string, files []string) (int, int, error) {
+func diffPatchBytes(repoRoot, indexFile, objectDir, baseline string, files []string, after ...string) ([]byte, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"--literal-pathspecs", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", baseline}, after...)
+	args = append(append(args, "--"), files...)
+	out, err := runGitIndexObjects(repoRoot, indexFile, objectDir, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > 8*1024*1024 {
+		return nil, fmt.Errorf("task patch exceeds byte quota")
+	}
+	return []byte(out), nil
+}
+
+func numstat(repoRoot, indexFile, baseline string, files []string, after ...string) (int, int, error) {
+	return numstatObjects(repoRoot, indexFile, "", baseline, files, after...)
+}
+
+func numstatObjects(repoRoot, indexFile, objectDir, baseline string, files []string, after ...string) (int, int, error) {
 	if len(files) == 0 {
 		return 0, 0, nil
 	}
-	args := append([]string{"diff", baseline, "--numstat", "-z", "--"}, files...)
-	out, err := runGitIndex(repoRoot, indexFile, args...)
+	args := append([]string{"--literal-pathspecs", "diff", baseline}, after...)
+	args = append(append(args, "--no-renames", "--numstat", "-z", "--"), files...)
+	out, err := runGitIndexObjects(repoRoot, indexFile, objectDir, args...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -480,40 +601,16 @@ func dedup(in []string) []string {
 	return out
 }
 
-func writeNULList(path string, items []string) error {
-	var buf bytes.Buffer
-	for _, s := range items {
-		buf.WriteString(s)
-		buf.WriteByte(0)
-	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
-}
-
-func writeNULPairs(path string, keys []string, m map[string]string) error {
-	var buf bytes.Buffer
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		buf.WriteString(k)
-		buf.WriteByte(0)
-		buf.WriteString(v)
-		buf.WriteByte(0)
-	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
-}
-
 func writeFilesChanged(path string, files []string) error {
 	if len(files) == 0 {
-		return os.WriteFile(path, nil, 0o644)
+		return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), nil, 0o600)
 	}
 	var buf bytes.Buffer
 	for _, f := range files {
 		buf.WriteString(f)
 		buf.WriteByte('\n')
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), buf.Bytes(), 0o600)
 }
 
 func writeStatsJSON(path string, stats Stats) error {
@@ -524,5 +621,5 @@ func writeStatsJSON(path string, stats Stats) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return artifact.WriteAtomic(filepath.Dir(path), filepath.Base(path), b, 0o600)
 }
