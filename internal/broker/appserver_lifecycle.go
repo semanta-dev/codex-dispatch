@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/semanta-dev/codex-dispatch/internal/codex/appserver"
 	"github.com/semanta-dev/codex-dispatch/internal/authority"
+	"github.com/semanta-dev/codex-dispatch/internal/codex/appserver"
 )
 
 // AppServerFactory builds a fresh AppServer instance. Defaults to spawning

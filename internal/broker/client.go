@@ -619,6 +619,7 @@ func (c *Client) dispatchRunHTTP(ctx context.Context, p DispatchRunParams, onEve
 		return &result, nil
 	}
 }
+
 // ClaimAcquire calls claim.acquire.
 func (c *Client) ClaimAcquire(ctx context.Context, args map[string]any) (any, error) {
 	return c.rawCall(ctx, "claim.acquire", args)
