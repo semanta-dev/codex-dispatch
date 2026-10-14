@@ -16,21 +16,41 @@ import (
 // Returns a release function that removes the PID file. Safe to call
 // multiple times; subsequent calls are no-ops.
 func AcquirePIDFile(path string) (func(), error) {
-	if existing, ok := readPIDFile(path); ok {
-		if existing != os.Getpid() && processLive(existing) {
+	pidBytes := []byte(strconv.Itoa(os.Getpid()))
+	for {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			if _, err := file.Write(pidBytes); err == nil {
+				err = file.Close()
+			} else {
+				_ = file.Close()
+			}
+			if err != nil {
+				_ = os.Remove(path)
+				return nil, fmt.Errorf("write PID file %s: %w", path, err)
+			}
+			break
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("create PID file %s: %w", path, err)
+		}
+		existing, ok := readPIDFile(path)
+		if ok && existing != os.Getpid() && processLive(existing) {
 			return nil, fmt.Errorf("broker already running (PID %d) — PID file at %s", existing, path)
 		}
-	}
-
-	pidBytes := []byte(strconv.Itoa(os.Getpid()))
-	if err := os.WriteFile(path, pidBytes, 0o600); err != nil {
-		return nil, fmt.Errorf("write PID file %s: %w", path, err)
+		// A malformed or stale file cannot represent a live broker. Remove it
+		// and retry exclusive creation; a concurrent broker will win the race.
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove stale PID file %s: %w", path, err)
+		}
 	}
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			_ = os.Remove(path)
+			if current, ok := readPIDFile(path); ok && current == os.Getpid() {
+				_ = os.Remove(path)
+			}
 		})
 	}, nil
 }

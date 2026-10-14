@@ -171,4 +171,6 @@ jobs:
       - name: fan-in rollback tests
         run: python3 -m unittest discover -s tests/python
       - name: run plan-runner bats
+        env:
+          CODEX_DISPATCH_BIN: ${{ steps.bin.outputs.path }}
         run: bats tests/bats/graphrag-plan-runner.bats

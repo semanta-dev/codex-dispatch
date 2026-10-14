@@ -31,7 +31,9 @@ func accountHomeFromPasswd(reader io.Reader, uid int) (string, error) {
 			continue
 		}
 		parts := strings.Split(line, ":")
-		if len(parts) != 7 || parts[2] != strconv.Itoa(uid) {
+		// GECOS (parts[4]) may contain colons; everything before it is
+		// fixed-field, so require the record to be at least seven fields.
+		if len(parts) < 7 || parts[2] != strconv.Itoa(uid) {
 			continue
 		}
 		if !filepath.IsAbs(parts[5]) {

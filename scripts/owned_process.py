@@ -8,11 +8,11 @@ import ctypes
 import os
 import re
 import select
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 def descendants(pid):
@@ -138,7 +138,7 @@ def main():
         for descriptor in [ready_fd, commit_fd]:
             if descriptor is not None:
                 os.close(descriptor)
-    return code if code >= 0 else 128 - code
+    return code if code >= 0 else 128 + abs(code)
 
 
 if __name__ == '__main__':

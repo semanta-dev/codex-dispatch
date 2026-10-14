@@ -639,18 +639,13 @@ func (t *Table) Events(id string, sinceSeq int64) ([]Event, error) {
 
 	// Collect events in chronological order from the ring.
 	// sinceSeq is inclusive: return events with Seq >= sinceSeq.
-	out := make([]Event, 0, int64(rec.totalEv)-sinceSeq+1)
+	count := int64(rec.totalEv) - sinceSeq + 1
+	out := make([]Event, count)
 	// Walk backwards from head looking for events with Seq >= sinceSeq.
-	for i := 0; i < len(rec.events); i++ {
+	for i := 0; i < int(count); i++ {
 		idx := (rec.head - 1 - i + len(rec.events)) % len(rec.events)
 		ev := rec.events[idx]
-		if ev.Seq == 0 {
-			break // empty slot; nothing more
-		}
-		if ev.Seq < sinceSeq {
-			break
-		}
-		out = append([]Event{ev}, out...)
+		out[int(count)-1-i] = ev
 	}
 	return out, nil
 }

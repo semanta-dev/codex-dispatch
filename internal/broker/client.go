@@ -619,3 +619,17 @@ func (c *Client) dispatchRunHTTP(ctx context.Context, p DispatchRunParams, onEve
 		return &result, nil
 	}
 }
+// ClaimAcquire calls claim.acquire.
+func (c *Client) ClaimAcquire(ctx context.Context, args map[string]any) (any, error) {
+	return c.rawCall(ctx, "claim.acquire", args)
+}
+
+// ClaimRelease calls claim.release.
+func (c *Client) ClaimRelease(ctx context.Context, args map[string]any) (any, error) {
+	return c.rawCall(ctx, "claim.release", args)
+}
+
+// ClaimList calls claim.list.
+func (c *Client) ClaimList(ctx context.Context, args map[string]any) (any, error) {
+	return c.rawCall(ctx, "claim.list", args)
+}
