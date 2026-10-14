@@ -42,12 +42,16 @@ jobs:
         with:
           version: v2.8.0
 
+  # Native execution is Linux-only: the sandbox (bubblewrap) and the process
+  # ownership model have no macOS or Windows equivalent, so those legs only
+  # exercised unsupported paths. Windows and macOS portability stays covered by
+  # the cross-compile step in the `go` job.
   native:
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-15-intel, macos-15]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -58,49 +62,24 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/native-evidence"
-          if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update
-            sudo apt-get install -y bubblewrap ripgrep
-            bash scripts/ci-configure-bwrap.sh | tee "$RUNNER_TEMP/native-evidence/bwrap-prerequisite.txt"
-          fi
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install bash
-            echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-          fi
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep
+          bash scripts/ci-configure-bwrap.sh | tee "$RUNNER_TEMP/native-evidence/bwrap-prerequisite.txt"
           git clone --depth 1 --branch v1.12.0 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats-core"
           echo "$RUNNER_TEMP/bats-core/bin" >> "$GITHUB_PATH"
-      - name: provision unprivileged Windows ACL test principal
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $aclPassword = [guid]::NewGuid().ToString('N') + 'aA1!'
-          Write-Output "::add-mask::$aclPassword"
-          New-LocalUser -Name CodexAclProbe -Password (ConvertTo-SecureString $aclPassword -AsPlainText -Force) -AccountNeverExpires
-          Add-LocalGroupMember -Group Users -Member CodexAclProbe
-          "CODEX_ACL_TEST_USER=CodexAclProbe" >> $env:GITHUB_ENV
-          "CODEX_ACL_TEST_PASSWORD=$aclPassword" >> $env:GITHUB_ENV
       - name: native Go tests
         shell: bash
         run: go test -json ./... > "$RUNNER_TEMP/native-evidence/native-tests.jsonl"
-      - name: remove ACL test principal
-        if: always() && runner.os == 'Windows'
-        shell: pwsh
-        run: Remove-LocalUser -Name CodexAclProbe -ErrorAction SilentlyContinue
       - name: native artifact build and launch
         shell: bash
         run: |
-          suffix=""
-          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          go build -o "$RUNNER_TEMP/codex-dispatch$suffix" ./cmd/codex-dispatch
-          "$RUNNER_TEMP/codex-dispatch$suffix" --version
+          go build -o "$RUNNER_TEMP/codex-dispatch" ./cmd/codex-dispatch
+          "$RUNNER_TEMP/codex-dispatch" --version
       - name: native shell and failure-injection gates
         shell: bash
         run: |
           bash --version
-          suffix=""
-          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          export CODEX_DISPATCH_BIN="$RUNNER_TEMP/codex-dispatch$suffix"
-          export MSYS=winsymlinks:nativestrict
+          export CODEX_DISPATCH_BIN="$RUNNER_TEMP/codex-dispatch"
           bats --print-output-on-failure tests/bats/launcher.bats tests/bats/dispatch-codex.bats tests/bats/dispatch-detach.bats tests/bats/clean-verify.bats tests/bats/graphrag-scope-audit.bats tests/bats/graphrag-worktree-dispatch.bats tests/bats/graphrag-plan-runner.bats > "$RUNNER_TEMP/native-evidence/native-shell.tap"
           python3 -m unittest discover -s tests/python > "$RUNNER_TEMP/native-evidence/native-python.txt" 2>&1
       - name: Adversarial remediation regression gates
